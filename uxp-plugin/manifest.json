@@ -1,0 +1,58 @@
+{
+  "id": "com.antigravity.airetouch",
+  "name": "AI Retouch - Blemish Remover",
+  "version": "1.0.0",
+  "main": "index.html",
+  "manifestVersion": 5,
+  "host": [
+    {
+      "app": "PS",
+      "minVersion": "23.0.0"
+    }
+  ],
+  "entrypoints": [
+    {
+      "type": "panel",
+      "id": "blemishRemovalPanel",
+      "label": {
+        "default": "AI Blemish Remover"
+      },
+      "minimumSize": {
+        "width": 260,
+        "height": 420
+      },
+      "maximumSize": {
+        "width": 600,
+        "height": 1000
+      },
+      "preferredDockedSize": {
+        "width": 300,
+        "height": 520
+      }
+    }
+  ],
+  "requiredPermissions": {
+    "network": {
+      "domains": [
+        "http://127.0.0.1:8000",
+        "http://127.0.0.1:8008",
+        "http://127.0.0.1:8001",
+        "http://localhost:8000",
+        "http://localhost:8008",
+        "http://localhost:8001"
+      ]
+    },
+    "localFileSystem": "plugin",
+    "clipboard": "readAndWrite",
+    "allowCodeGenerationFromStrings": true
+  },
+  "icons": [
+    {
+      "width": 23,
+      "height": 23,
+      "path": "icons/icon-23.png",
+      "scale": [1, 2],
+      "theme": ["darkest", "dark", "medium", "lightest"]
+    }
+  ]
+}
