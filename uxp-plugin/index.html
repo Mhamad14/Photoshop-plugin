@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Retouch v2 - Auto-Detection</title>
+  <link rel="stylesheet" href="index.css">
+</head>
+<body>
+  <div class="panel-container">
+    <!-- Header -->
+    <header class="panel-header">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83" />
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>AI Retouch <span class="badge-v2">v2</span></h1>
+          <span class="version-tag">Auto-Detect & Live Preview</span>
+        </div>
+      </div>
+      <div id="server-status" class="status-badge checking" title="Checking backend server...">
+        <span class="status-dot"></span>
+        <span id="status-label">Checking...</span>
+      </div>
+    </header>
+
+    <!-- Main Content Scrollable Area -->
+    <main class="panel-content">
+      
+      <!-- Top Action: Auto-Detect Portrait -->
+      <section class="detect-action-card">
+        <button id="btn-auto-detect" class="primary-btn pulse-glow">
+          <span class="btn-icon">⚡</span>
+          <span class="btn-text">1. Auto-Detect Portrait</span>
+          <div class="spinner" id="detect-spinner"></div>
+        </button>
+        <p class="card-hint">Instantly segments facial skin & isolates blemish candidates.</p>
+      </section>
+
+      <!-- Layer 3: Interactive Live Preview Viewport -->
+      <section class="preview-card" id="preview-section">
+        <div class="preview-header">
+          <div class="preview-title">
+            <span>Live Interactive Preview</span>
+            <span id="blob-counter" class="pill-badge">0 Spots</span>
+          </div>
+          <div class="preview-swatch-container" title="Sampled Base Skin Tone">
+            <span class="swatch-label">Skin Tone:</span>
+            <div id="tone-swatch" class="tone-swatch" style="background-color: #e5b497;"></div>
+          </div>
+        </div>
+
+        <!-- Canvas Container -->
+        <div class="canvas-wrapper" id="canvas-wrapper">
+          <canvas id="preview-canvas" width="300" height="220"></canvas>
+          <div id="canvas-empty-overlay" class="canvas-empty-state">
+            <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+              <circle cx="8.5" cy="8.5" r="1.5"/>
+              <polyline points="21 15 16 10 5 21"/>
+            </svg>
+            <span>Click "Auto-Detect Portrait" to load preview</span>
+          </div>
+        </div>
+
+        <!-- Canvas Toolbar & Layer Visibility -->
+        <div class="preview-toolbar">
+          <div class="tool-buttons">
+            <button id="tool-pimple" class="tool-btn active" title="Click spot to toggle / add blemish">
+              <span class="tool-icon">🔴</span>
+              <span>Blemish Tool</span>
+            </button>
+            <button id="tool-eyedropper" class="tool-btn" title="Click clean skin to sample base tone">
+              <span class="tool-icon">🧪</span>
+              <span>Skin Sampler</span>
+            </button>
+          </div>
+          <div class="mask-toggles">
+            <label class="mini-toggle" title="Toggle red pimple markers">
+              <input type="checkbox" id="chk-show-pimples" checked>
+              <span class="mini-tag red">Pimples</span>
+            </label>
+            <label class="mini-toggle" title="Toggle cyan skin region">
+              <input type="checkbox" id="chk-show-skin" checked>
+              <span class="mini-tag blue">Skin</span>
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <!-- Layer 4: AI Text Refinement (Natural Language) -->
+      <details class="refine-drawer">
+        <summary class="drawer-title">
+          <span>✨ AI Text Instruction Refinement</span>
+          <svg class="chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </summary>
+        <div class="drawer-content">
+          <div class="prompt-input-row">
+            <input type="text" id="input-prompt" placeholder="e.g. 'remove mole near chin', 'ignore nose freckles'">
+            <button id="btn-send-prompt" class="secondary-btn" title="Send instruction to AI">
+              <span>Send</span>
+            </button>
+          </div>
+        </div>
+      </details>
+
+      <!-- Feature Controls: The Two Actions -->
+      <section class="feature-card">
+        <div class="feature-header">
+          <label class="checkbox-label">
+            <input type="checkbox" id="chk-enable-heal" checked>
+            <span class="checkbox-custom"></span>
+            <span class="feature-name">Feature 1: Remove Pimples</span>
+          </label>
+          <span class="feature-tech">LaMa Inpaint</span>
+        </div>
+
+        <div class="feature-body" id="heal-controls-body">
+          <div class="control-group">
+            <div class="control-label">
+              <span>Detection Sensitivity</span>
+              <span id="val-sensitivity" class="val-badge">50%</span>
+            </div>
+            <input type="range" id="slider-sensitivity" min="10" max="100" value="50" step="5">
+          </div>
+
+          <details class="nested-drawer">
+            <summary class="nested-title">
+              <span>Fine-Tuning (Texture, Feather, Grain)</span>
+              <svg class="chevron" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="6 9 12 15 18 9"></polyline>
+              </svg>
+            </summary>
+            <div class="nested-content">
+              <div class="control-group">
+                <div class="control-label">
+                  <span>Skin Texture Retention</span>
+                  <span id="val-texture" class="val-badge">25%</span>
+                </div>
+                <input type="range" id="slider-texture" min="0" max="100" value="25" step="5">
+              </div>
+              <div class="control-group">
+                <div class="control-label">
+                  <span>Edge Feather</span>
+                  <span id="val-feather" class="val-badge">3px</span>
+                </div>
+                <input type="range" id="slider-feather" min="0" max="10" value="3" step="1">
+              </div>
+              <div class="control-group">
+                <div class="control-label">
+                  <span>Micro-Grain Overlay</span>
+                  <span id="val-grain" class="val-badge">3%</span>
+                </div>
+                <input type="range" id="slider-grain" min="0" max="15" value="3" step="1">
+              </div>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <section class="feature-card">
+        <div class="feature-header">
+          <label class="checkbox-label">
+            <input type="checkbox" id="chk-enable-lighten" checked>
+            <span class="checkbox-custom"></span>
+            <span class="feature-name">Feature 2: Lighten Skin</span>
+          </label>
+          <span class="feature-tech">Tone-Relative</span>
+        </div>
+
+        <div class="feature-body" id="lighten-controls-body">
+          <div class="control-group">
+            <div class="control-label">
+              <span>Brightening Strength</span>
+              <span id="val-strength" class="val-badge">35%</span>
+            </div>
+            <input type="range" id="slider-strength" min="5" max="100" value="35" step="5">
+          </div>
+          <div class="toggle-group">
+            <label class="toggle-item">
+              <input type="checkbox" id="chk-include-neck" checked>
+              <span class="checkmark"></span>
+              <span>Include Neck in Lightening Zone</span>
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <!-- Main Execution Action: Apply Retouch -->
+      <section class="apply-section">
+        <button id="btn-apply-all" class="primary-btn execute-btn">
+          <span class="btn-icon">✨</span>
+          <span class="btn-text">2. Apply AI Retouch (Heal & Lighten)</span>
+          <div class="spinner" id="apply-spinner"></div>
+        </button>
+        <p class="apply-hint">Creates non-destructive layers in Photoshop without modifying original.</p>
+      </section>
+
+      <!-- Live Log / Status Banner -->
+      <div id="log-box" class="log-box info">
+        <span id="log-message">Ready. Open portrait and click "Auto-Detect Portrait".</span>
+      </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="panel-footer">
+      <div class="server-config">
+        <label for="input-server-url">Backend:</label>
+        <input type="text" id="input-server-url" value="http://127.0.0.1:8001">
+        <button id="btn-refresh-status" title="Refresh Connection" class="icon-btn">
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M23 4v6h-6M1 20v-6h6" />
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+          </svg>
+        </button>
+      </div>
+    </footer>
+  </div>
+
+  <script src="index.js"></script>
+</body>
+</html>

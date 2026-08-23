@@ -1,0 +1,63 @@
+import os
+import sys
+import socket
+import subprocess
+
+def is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex((host, port)) == 0
+
+def find_available_port(preferred_port: int = 8000, host: str = "127.0.0.1") -> int:
+    if not is_port_in_use(preferred_port, host):
+        return preferred_port
+    print(f"[!] Port {preferred_port} is busy. Probing alternative ports...")
+    for alt_port in [8008, 8001, 8080, 8888, 5000]:
+        if not is_port_in_use(alt_port, host):
+            print(f"[+] Found available port: {alt_port}")
+            return alt_port
+    return preferred_port
+
+def main():
+    print("=" * 60)
+    print(" Starting AI Retouching Local Server (FastAPI + Simple-LaMa)")
+    print("=" * 60)
+    
+    print(f"[*] Python executable: {sys.executable}")
+    print(f"[*] Python version: {sys.version}")
+    
+    # Check dependencies
+    required = ["fastapi", "uvicorn", "PIL", "torch", "simple_lama_inpainting", "cv2"]
+    missing = []
+    for pkg in required:
+        try:
+            if pkg == "PIL":
+                __import__("PIL")
+            elif pkg == "cv2":
+                __import__("cv2")
+            else:
+                __import__(pkg)
+        except ImportError:
+            missing.append(pkg)
+            
+    if missing:
+        print(f"[!] Missing required packages: {', '.join(missing)}")
+        print("[*] Installing requirements...")
+        req_path = os.path.join(os.path.dirname(__file__), "requirements.txt")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req_path])
+    
+    port = find_available_port(8000)
+    print(f"[*] Launching Uvicorn server on http://127.0.0.1:{port} ...")
+    print("[*] Keep this window open while using Photoshop.")
+    print("=" * 60)
+    
+    import uvicorn
+    uvicorn.run("server:app", host="127.0.0.1", port=port, reload=False)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"\n[ERROR] Server encountered an error: {e}")
+        import traceback
+        traceback.print_exc()
+        input("\nPress Enter to exit...")
