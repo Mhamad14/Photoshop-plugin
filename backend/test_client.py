@@ -3,11 +3,11 @@ import time
 import requests
 from PIL import Image, ImageDraw
 
-SERVER_URL = "http://127.0.0.1:8001"
+SERVER_URL = "http://127.0.0.1:8765"
 
 def find_server_url():
     global SERVER_URL
-    candidates = ["http://127.0.0.1:8001", "http://127.0.0.1:8008", "http://127.0.0.1:8000"]
+    candidates = ["http://127.0.0.1:8765", "http://127.0.0.1:8766", "http://127.0.0.1:8001"]
     for url in candidates:
         try:
             resp = requests.get(f"{url}/health", timeout=2)
