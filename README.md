@@ -46,7 +46,7 @@ Photoshop-plugin/
    pip install -r backend/requirements.txt
    python backend/server.py
    ```
-3. The server will start on `http://127.0.0.1:8000`. On first run, it will automatically download the lightweight LaMa model weights (~200MB).
+3. The server will start on `http://127.0.0.1:8765` (falls back to 8766/8001 if busy — 8000 is avoided since PHP dev servers commonly occupy it). On first run, it will automatically download the lightweight LaMa model weights (~200MB).
 
 To verify the server is running correctly:
 ```bash

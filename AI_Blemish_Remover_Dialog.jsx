@@ -2,14 +2,17 @@
 
 /**
  * AI Retouch - Blemish & Pimple Remover (Modal Dialog Version)
- * For quick 1-click inpainting in Photoshop 2020+
+ * Fast 1-click inpainting in Photoshop CS6 - CC 2026
  */
 
 (function () {
     var SERVER_CANDIDATES = [
+        "http://127.0.0.1:8001",
+        "http://127.0.0.1:8765",
         "http://127.0.0.1:8008",
         "http://127.0.0.1:8000",
-        "http://127.0.0.1:8001"
+        "http://127.0.0.1:9001",
+        "http://127.0.0.1:8080"
     ];
     var activeServerUrl = SERVER_CANDIDATES[0];
 
@@ -43,7 +46,7 @@
 
     function createMaskLayer() {
         if (app.documents.length === 0) {
-            alert("Please open an image in Photoshop first!", "AI Retouch");
+            alert("Please open an image in Photoshop first.", "AI Retouch");
             return;
         }
         var doc = app.activeDocument;
@@ -66,7 +69,7 @@
 
     function executeHeal(pad, textureBlend, featherRadius, grainIntensity, hideMask) {
         if (app.documents.length === 0) {
-            alert("Please open a photo first!", "AI Retouch");
+            alert("Please open a photo first.", "AI Retouch");
             return false;
         }
 
@@ -88,7 +91,7 @@
         var height = bottom - top;
 
         if (width <= 0 || height <= 0) {
-            alert("The selected mask layer is empty!\nPlease paint over blemishes with a brush first.", "Mask Layer Empty");
+            alert("The selected mask layer is empty.\nPlease paint over blemishes with a brush first.", "Mask Layer Empty");
             return false;
         }
 
@@ -100,156 +103,159 @@
         var cropRight = Math.min(docWidth, Math.ceil(right + pad));
         var cropBottom = Math.min(docHeight, Math.ceil(bottom + pad));
 
-        var maskLayerName = maskLayer.name;
-        var baseCropFile = new File(tempFolder.fsName + "/base_crop.png");
-        var maskCropFile = new File(tempFolder.fsName + "/mask_crop.png");
-        var healedPatchFile = new File(tempFolder.fsName + "/healed_patch.png");
+        var cropW = cropRight - cropLeft;
+        var cropH = cropBottom - cropTop;
 
-        if (baseCropFile.exists) baseCropFile.remove();
-        if (maskCropFile.exists) maskCropFile.remove();
-        if (healedPatchFile.exists) healedPatchFile.remove();
+        var cropBox = [
+            [cropLeft, cropTop],
+            [cropRight, cropTop],
+            [cropRight, cropBottom],
+            [cropLeft, cropBottom]
+        ];
+
+        var origActiveLayer = doc.activeLayer;
+        var origMaskVisible = maskLayer.visible;
+
+        maskLayer.visible = false;
+        var imageCropFile = new File(tempFolder.fsName + "/image_crop.png");
+        if (imageCropFile.exists) imageCropFile.remove();
+
+        var dupImageDoc = doc.duplicate("AI_Temp_Image", false);
+        dupImageDoc.selection.select(cropBox);
+        dupImageDoc.crop(dupImageDoc.selection.bounds);
+        dupImageDoc.flatten();
 
         var pngSaveOptions = new PNGSaveOptions();
         pngSaveOptions.compression = 0;
         pngSaveOptions.interlaced = false;
+        dupImageDoc.saveAs(imageCropFile, pngSaveOptions, true, Extension.LOWERCASE);
+        dupImageDoc.close(SaveOptions.DONOTSAVECHANGES);
 
-        // 1. Export Base Crop
-        var baseDoc = doc.duplicate("AI_Base_Crop_Temp", false);
-        try {
-            for (var i = 0; i < baseDoc.layers.length; i++) {
-                if (baseDoc.layers[i].name === maskLayerName) {
-                    baseDoc.layers[i].visible = false;
-                }
-            }
-        } catch (e) {}
-
-        baseDoc.flatten();
-        baseDoc.crop([
-            UnitValue(cropLeft, "px"),
-            UnitValue(cropTop, "px"),
-            UnitValue(cropRight, "px"),
-            UnitValue(cropBottom, "px")
-        ]);
-        baseDoc.saveAs(baseCropFile, pngSaveOptions, true, Extension.LOWERCASE);
-        baseDoc.close(SaveOptions.DONOTSAVECHANGES);
-
-        // 2. Export Mask Crop
-        var maskDoc = doc.duplicate("AI_Mask_Crop_Temp", false);
-        for (var j = 0; j < maskDoc.layers.length; j++) {
-            if (maskDoc.layers[j].name === maskLayerName) {
-                maskDoc.layers[j].visible = true;
-            } else {
-                maskDoc.layers[j].visible = false;
+        maskLayer.visible = true;
+        for (var k = 0; k < doc.artLayers.length; k++) {
+            if (doc.artLayers[k] !== maskLayer) {
+                doc.artLayers[k].visible = false;
             }
         }
-        maskDoc.crop([
-            UnitValue(cropLeft, "px"),
-            UnitValue(cropTop, "px"),
-            UnitValue(cropRight, "px"),
-            UnitValue(cropBottom, "px")
-        ]);
-        maskDoc.saveAs(maskCropFile, pngSaveOptions, true, Extension.LOWERCASE);
-        maskDoc.close(SaveOptions.DONOTSAVECHANGES);
 
-        // 3. Call FastAPI Backend
+        var maskCropFile = new File(tempFolder.fsName + "/mask_crop.png");
+        if (maskCropFile.exists) maskCropFile.remove();
+
+        var dupMaskDoc = doc.duplicate("AI_Temp_Mask", false);
+        dupMaskDoc.selection.select(cropBox);
+        dupMaskDoc.crop(dupMaskDoc.selection.bounds);
+        dupMaskDoc.flatten();
+        dupMaskDoc.saveAs(maskCropFile, pngSaveOptions, true, Extension.LOWERCASE);
+        dupMaskDoc.close(SaveOptions.DONOTSAVECHANGES);
+
+        for (var m = 0; m < doc.artLayers.length; m++) {
+            doc.artLayers[m].visible = true;
+        }
+        if (hideMask) {
+            maskLayer.visible = false;
+        }
+
+        var healedFile = new File(tempFolder.fsName + "/healed_patch.png");
+        if (healedFile.exists) healedFile.remove();
+
         var cmd = 'curl.exe -s -X POST ' +
-            '-F "image=@' + baseCropFile.fsName + '" ' +
+            '-F "image=@' + imageCropFile.fsName + '" ' +
             '-F "mask=@' + maskCropFile.fsName + '" ' +
             '-F "texture_blend=' + textureBlend + '" ' +
             '-F "feather_radius=' + featherRadius + '" ' +
             '-F "grain_intensity=' + grainIntensity + '" ' +
-            '-o "' + healedPatchFile.fsName + '" ' +
-            '"' + activeServerUrl + '/heal-blemish"';
+            '-o "' + healedFile.fsName + '" ' +
+            '"' + activeServerUrl + '/inpaint"';
 
         app.system(cmd);
 
-        if (!healedPatchFile.exists || healedPatchFile.length < 100) {
-            alert("AI inpainting request failed.\n\nMake sure 'run_server.bat' is running at " + activeServerUrl, "AI Server Error");
+        if (!healedFile.exists || healedFile.length < 500) {
+            alert("Inpainting failed. Verify backend server is running on " + activeServerUrl, "AI Server Error");
             return false;
         }
 
-        // 4. Place and offset patch
-        placeFile(healedPatchFile);
+        placeFile(healedFile);
 
         var placedLayer = doc.activeLayer;
-        placedLayer.name = "AI Blemish Removal";
+        placedLayer.name = "AI Healed Patch";
 
         var placedBounds = placedLayer.bounds;
-        var curLeft = placedBounds[0].as("px");
-        var curTop = placedBounds[1].as("px");
+        var pLeft = placedBounds[0].as("px");
+        var pTop = placedBounds[1].as("px");
 
-        var deltaX = cropLeft - curLeft;
-        var deltaY = cropTop - curTop;
-
-        if (deltaX !== 0 || deltaY !== 0) {
-            placedLayer.translate(UnitValue(deltaX, "px"), UnitValue(deltaY, "px"));
-        }
-
-        if (hideMask) {
-            maskLayer.visible = false;
-        }
+        var dx = cropLeft - pLeft;
+        var dy = cropTop - pTop;
+        placedLayer.translate(dx, dy);
 
         return true;
     }
 
     // Modal Dialog Window
-    var dlg = new Window("dialog", "AI Blemish Remover", undefined);
+    var dlg = new Window("dialog", "AI Retouch - Fast Spot Remover");
     dlg.orientation = "column";
     dlg.alignChildren = ["fill", "top"];
-    dlg.spacing = 8;
-    dlg.margins = 14;
+    dlg.spacing = 10;
+    dlg.margins = 16;
 
-    // Server Status
+    // --- Status Panel ---
     var health = checkBackendHealth();
-    var pnlStatus = dlg.add("panel", undefined, "AI Server Status");
+    var pnlStatus = dlg.add("panel", undefined, "Backend Status");
     pnlStatus.orientation = "row";
-    var txtStatus = pnlStatus.add("statictext", undefined, health.online ? "● Online (" + health.url.replace("http://127.0.0.1:", "Port ") + ")" : "● Offline (Start run_server.bat)");
-    txtStatus.preferredSize.width = 200;
-
-    // Actions
-    var btnMask = dlg.add("button", undefined, "1. Create 'Blemish Mask' Layer");
-    btnMask.preferredSize.height = 30;
-    btnMask.onClick = function () {
-        createMaskLayer();
-        dlg.close();
+    pnlStatus.alignChildren = ["left", "center"];
+    var statusTextVal = health.online ? "[Online] " + health.url.replace("http://127.0.0.1:", "Port ") : "[Offline] Start backend server";
+    var txtStatus = pnlStatus.add("statictext", undefined, statusTextVal);
+    txtStatus.preferredSize.width = 220;
+    var btnCheck = pnlStatus.add("button", undefined, "Check");
+    btnCheck.onClick = function () {
+        var h = checkBackendHealth();
+        txtStatus.text = h.online ? "[Online] " + h.url.replace("http://127.0.0.1:", "Port ") : "[Offline] Start backend server";
     };
 
-    var btnHeal = dlg.add("button", undefined, "2. Heal Painted Blemishes");
-    btnHeal.preferredSize.height = 36;
+    // --- Step 1 Panel ---
+    var pnlStep1 = dlg.add("panel", undefined, "Step 1: Paint Mask");
+    pnlStep1.orientation = "column";
+    pnlStep1.alignChildren = ["fill", "top"];
+    var btnNewMask = pnlStep1.add("button", undefined, "Create New Mask Layer");
+    btnNewMask.preferredSize.height = 30;
+    btnNewMask.onClick = function () {
+        createMaskLayer();
+    };
 
-    // Settings
-    var pnlSettings = dlg.add("panel", undefined, "Settings");
-    pnlSettings.orientation = "column";
-    pnlSettings.alignChildren = ["fill", "top"];
-    pnlSettings.spacing = 6;
+    // --- Step 2 Panel ---
+    var pnlStep2 = dlg.add("panel", undefined, "Step 2: AI Inpainting Parameters");
+    pnlStep2.orientation = "column";
+    pnlStep2.alignChildren = ["fill", "top"];
+    pnlStep2.spacing = 6;
 
-    var grpPad = pnlSettings.add("group");
+    var grpPad = pnlStep2.add("group");
     grpPad.orientation = "row";
     grpPad.add("statictext", undefined, "Padding:");
     var lblPad = grpPad.add("statictext", undefined, "20px");
     lblPad.preferredSize.width = 40;
-    var sldPad = pnlSettings.add("slider", undefined, 20, 10, 60);
+    var sldPad = pnlStep2.add("slider", undefined, 20, 10, 60);
     sldPad.onChanging = function () { lblPad.text = Math.round(sldPad.value) + "px"; };
 
-    var grpTex = pnlSettings.add("group");
+    var grpTex = pnlStep2.add("group");
     grpTex.orientation = "row";
     grpTex.add("statictext", undefined, "Skin Texture:");
     var lblTex = grpTex.add("statictext", undefined, "25%");
     lblTex.preferredSize.width = 40;
-    var sldTex = pnlSettings.add("slider", undefined, 25, 0, 100);
+    var sldTex = pnlStep2.add("slider", undefined, 25, 0, 100);
     sldTex.onChanging = function () { lblTex.text = Math.round(sldTex.value) + "%"; };
 
-    var grpFea = pnlSettings.add("group");
+    var grpFea = pnlStep2.add("group");
     grpFea.orientation = "row";
     grpFea.add("statictext", undefined, "Feather:");
     var lblFea = grpFea.add("statictext", undefined, "3px");
     lblFea.preferredSize.width = 40;
-    var sldFea = pnlSettings.add("slider", undefined, 3, 0, 10);
+    var sldFea = pnlStep2.add("slider", undefined, 3, 0, 10);
     sldFea.onChanging = function () { lblFea.text = Math.round(sldFea.value) + "px"; };
 
-    var chkHide = pnlSettings.add("checkbox", undefined, "Hide mask layer after healing");
+    var chkHide = pnlStep2.add("checkbox", undefined, "Hide mask layer after healing");
     chkHide.value = true;
 
+    var btnHeal = dlg.add("button", undefined, "Heal Painted Blemishes");
+    btnHeal.preferredSize.height = 36;
     btnHeal.onClick = function () {
         var pad = Math.round(sldPad.value);
         var textureBlend = (Math.round(sldTex.value) / 100.0).toFixed(2);

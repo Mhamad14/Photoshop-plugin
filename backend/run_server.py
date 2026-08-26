@@ -7,11 +7,11 @@ def is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex((host, port)) == 0
 
-def find_available_port(preferred_port: int = 8000, host: str = "127.0.0.1") -> int:
+def find_available_port(preferred_port: int = 8765, host: str = "127.0.0.1") -> int:
     if not is_port_in_use(preferred_port, host):
         return preferred_port
     print(f"[!] Port {preferred_port} is busy. Probing alternative ports...")
-    for alt_port in [8008, 8001, 8080, 8888, 5000]:
+    for alt_port in [8766, 8001, 9001, 5005]:
         if not is_port_in_use(alt_port, host):
             print(f"[+] Found available port: {alt_port}")
             return alt_port
@@ -45,7 +45,7 @@ def main():
         req_path = os.path.join(os.path.dirname(__file__), "requirements.txt")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req_path])
     
-    port = find_available_port(8000)
+    port = find_available_port(8765)
     print(f"[*] Launching Uvicorn server on http://127.0.0.1:{port} ...")
     print("[*] Keep this window open while using Photoshop.")
     print("=" * 60)
