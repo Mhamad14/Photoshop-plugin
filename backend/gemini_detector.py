@@ -34,18 +34,22 @@ def detect_blemishes_gemini(
         img_bytes = img_buf.getvalue()
 
         prompt = """
-You are a precision dermatological vision AI.
-Detect ALL acne, pimples, red inflamed blemishes, whiteheads, blackheads, cysts, and pustules on the skin in this portrait photo.
+You are a precision retouching vision AI.
+Detect ALL skin imperfections that a professional photo retoucher would remove, in this portrait photo:
+acne, pimples, pustules, whiteheads, blackheads, cysts, milia, red inflamed patches, acne scars,
+dark spots, sun spots, age spots, and small flat blemishes.
 
 CRITICAL INSTRUCTIONS:
-1. ONLY detect actual pimples, acne spots, and red inflamed blemishes.
-2. DO NOT detect lips, mouth, nose tip, nostrils, eyes, eyebrows, ears, hair, moles, or normal clean skin.
-3. For each detected spot, return its precise 2D bounding box in normalized coordinates [ymin, xmin, ymax, xmax] on a scale of 0 to 1000.
+1. ONLY detect actual skin imperfections a retoucher would hide.
+2. DO NOT detect: lips, mouth, nose tip, nostrils, eyes, eyebrows, ears, hair, teeth, jewelry, clothing.
+3. DO NOT detect: large identity moles or beauty marks, freckle patterns spread evenly across large areas, or natural smile lines.
+4. Each detection must be a small localized region (roughly under 2% of the face area).
+5. For each detected imperfection, return its precise 2D bounding box in normalized coordinates [ymin, xmin, ymax, xmax] on a scale of 0 to 1000, plus a short label.
 
 Output strictly valid JSON with this schema:
 {
   "blemishes": [
-    {"box_2d": [ymin, xmin, ymax, xmax], "label": "pimple"}
+    {"box_2d": [ymin, xmin, ymax, xmax], "label": "pimple|blackhead|scar|dark_spot|red_patch|milia"}
   ]
 }
 """

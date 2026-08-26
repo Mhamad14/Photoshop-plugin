@@ -1,6 +1,6 @@
 /**
  * AI Retouching Photoshop UXP Plugin - v2 Auto-Detection Architecture
- * Face & Skin Segmentation (BiSeNet), Hybrid Pimple Detection, Live Canvas Preview & LaMa Inpainting
+ * BiSeNet Skin Segmentation | Hybrid Pimple Detection | Live Result Preview (Before/After) | LaMa Inpainting
  */
 
 const photoshop = require("photoshop");
@@ -8,7 +8,7 @@ const { app, core, action } = photoshop;
 const uxp = require("uxp");
 const { localFileSystem } = uxp.storage;
 
-// UI Elements
+/* ============================== DOM ============================== */
 const statusBadge = document.getElementById("server-status");
 const statusLabel = document.getElementById("status-label");
 const inputServerUrl = document.getElementById("input-server-url");
@@ -16,13 +16,20 @@ const btnRefreshStatus = document.getElementById("btn-refresh-status");
 
 const btnAutoDetect = document.getElementById("btn-auto-detect");
 const detectSpinner = document.getElementById("detect-spinner");
+const detectBtnText = document.getElementById("detect-btn-text");
+
+const previewCanvas = document.getElementById("preview-canvas");
+const canvasWrapper = document.getElementById("canvas-wrapper");
+const canvasEmptyOverlay = document.getElementById("canvas-empty-overlay");
+const previewStatusPill = document.getElementById("preview-status");
 const blobCounter = document.getElementById("blob-counter");
 const toneSwatch = document.getElementById("tone-swatch");
 
-const previewCanvas = document.getElementById("preview-canvas");
-const canvasEmptyOverlay = document.getElementById("canvas-empty-overlay");
 const toolPimple = document.getElementById("tool-pimple");
 const toolEyedropper = document.getElementById("tool-eyedropper");
+const btnModeBefore = document.getElementById("btn-mode-before");
+const btnModeSplit = document.getElementById("btn-mode-split");
+const btnModeAfter = document.getElementById("btn-mode-after");
 const chkShowPimples = document.getElementById("chk-show-pimples");
 const chkShowSkin = document.getElementById("chk-show-skin");
 
@@ -39,6 +46,12 @@ const valFeather = document.getElementById("val-feather");
 const sliderGrain = document.getElementById("slider-grain");
 const valGrain = document.getElementById("val-grain");
 
+const chkEnableSmooth = document.getElementById("chk-enable-smooth");
+const sliderSmoothStrength = document.getElementById("slider-smooth-strength");
+const valSmoothStrength = document.getElementById("val-smooth-strength");
+const sliderTextureKeep = document.getElementById("slider-texture-keep");
+const valTextureKeep = document.getElementById("val-texture-keep");
+
 const chkEnableLighten = document.getElementById("chk-enable-lighten");
 const sliderStrength = document.getElementById("slider-strength");
 const valStrength = document.getElementById("val-strength");
@@ -46,45 +59,37 @@ const chkIncludeNeck = document.getElementById("chk-include-neck");
 
 const btnApplyAll = document.getElementById("btn-apply-all");
 const applySpinner = document.getElementById("apply-spinner");
+const applyBtnText = document.getElementById("apply-btn-text");
 const logBox = document.getElementById("log-box");
 const logMessage = document.getElementById("log-message");
 
-// Plugin State
+/* ============================== STATE ============================== */
 let isServerOnline = false;
 let isProcessing = false;
-let activeTool = "pimple"; // 'pimple' or 'eyedropper'
+let activeTool = "pimple";          // 'pimple' | 'eyedropper'
+let viewMode = "split";             // 'before' | 'split' | 'after'
 
-let currentPortraitImage = null;
-let currentSkinMaskImage = null;
+let currentPortraitBlob = null;     // PNG snapshot of the document
+let currentPortraitImage = null;    // Image element for canvas drawing
+let portraitDataCanvas = null;      // Offscreen native-res copy for pixel sampling
+let currentSkinMaskImage = null;    // Image element (overlay tint)
+let currentSkinMaskBlob = null;     // Raw PNG blob (sent back to /preview & /apply-lighten)
 let currentBlobs = [];
-let sampledBaseTone = { rgb: [230, 180, 150], lab: [180.0, 140.0, 145.0] };
-let lastPortraitBlob = null;
+let sampledBaseTone = { rgb: [230, 180, 150], lab: [185.7, 141.0, 145.0] };
 
-// Sliders listeners
-sliderSensitivity.addEventListener("input", () => { valSensitivity.textContent = `${sliderSensitivity.value}%`; });
-sliderTexture.addEventListener("input", () => { valTexture.textContent = `${sliderTexture.value}%`; });
-sliderFeather.addEventListener("input", () => { valFeather.textContent = `${sliderFeather.value}px`; });
-sliderGrain.addEventListener("input", () => { valGrain.textContent = `${sliderGrain.value}%`; });
-sliderStrength.addEventListener("input", () => { valStrength.textContent = `${sliderStrength.value}%`; });
+let resultImage = null;             // Rendered AFTER image from /preview
+let splitPos = 0.5;
+let previewSeq = 0;
+let previewTimer = null;
+let previewBusy = false;
+let previewQueued = false;
+let analyzeTimer = null;
 
-chkShowPimples.addEventListener("change", renderCanvas);
-chkShowSkin.addEventListener("change", renderCanvas);
+let viewGeom = null;                // {scale, offX, offY, renderW, renderH}
+let mouseDownInfo = null;
+let draggingSplit = false;
 
-// Tool toggles
-toolPimple.addEventListener("click", () => {
-  activeTool = "pimple";
-  toolPimple.classList.add("active");
-  toolEyedropper.classList.remove("active");
-  previewCanvas.style.cursor = "crosshair";
-});
-
-toolEyedropper.addEventListener("click", () => {
-  activeTool = "eyedropper";
-  toolEyedropper.classList.add("active");
-  toolPimple.classList.remove("active");
-  previewCanvas.style.cursor = "cell";
-});
-
+/* ============================== HELPERS ============================== */
 function setLog(message, type = "info") {
   logMessage.textContent = message;
   logBox.className = `log-box ${type}`;
@@ -94,31 +99,83 @@ function getServerUrl() {
   return inputServerUrl.value.trim().replace(/\/+$/, "");
 }
 
-/**
- * Check backend server connectivity with smart port discovery
- */
-async function checkServerStatus() {
-  const currentUrl = getServerUrl();
-  const candidateUrls = [
-    currentUrl,
-    "http://127.0.0.1:8001",
-    "http://127.0.0.1:8008",
-    "http://127.0.0.1:8000"
+function setPreviewStatus(state) {
+  const labels = {
+    idle: "Idle",
+    analyzing: "Analyzing\u2026",
+    updating: "Updating\u2026",
+    live: "Live",
+    stale: "Editing\u2026",
+    error: "Error"
+  };
+  previewStatusPill.textContent = labels[state] || state;
+  previewStatusPill.className = `preview-pill pill-${state}`;
+}
+
+function rgbToHex(r, g, b) {
+  return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+}
+
+function updateToneSwatch(rgb) {
+  toneSwatch.style.backgroundColor = rgbToHex(rgb[0], rgb[1], rgb[2]);
+}
+
+/** sRGB -> CIE LAB (OpenCV 8-bit convention: L*255/100, a/b shifted +128) */
+function rgbToLab(r, g, b) {
+  const lin = (c) => {
+    c /= 255;
+    return c > 0.04045 ? Math.pow((c + 0.055) / 1.055, 2.4) : c / 12.92;
+  };
+  const R = lin(r), G = lin(g), B = lin(b);
+  let X = (R * 0.4124564 + G * 0.3575761 + B * 0.1804375) / 0.95047;
+  let Y = (R * 0.2126729 + G * 0.7151522 + B * 0.072175);
+  let Z = (R * 0.0193339 + G * 0.119192 + B * 0.9503041) / 1.08883;
+  const f = (t) => (t > 0.008856 ? Math.cbrt(t) : (7.787 * t) + (16 / 116));
+  X = f(X); Y = f(Y); Z = f(Z);
+  const Lstar = 116 * Y - 16;
+  const astar = 500 * (X - Y);
+  const bstar = 200 * (Y - Z);
+  return [
+    Math.round(Lstar * 255 / 100),
+    Math.round(astar + 128),
+    Math.round(bstar + 128)
   ];
-  const uniqueUrls = [...new Set(candidateUrls)];
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+function dataUrlToBlob(dataUrl, mime = "image/png") {
+  const b64 = dataUrl.split(",")[1];
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+/* ============================== SERVER STATUS ============================== */
+async function checkServerStatus() {
+  const candidateUrls = [
+    getServerUrl(),
+    "http://127.0.0.1:8765",
+    "http://127.0.0.1:8766",
+    "http://127.0.0.1:8001"
+  ].filter((v, i, a) => v && a.indexOf(v) === i);
 
   statusBadge.className = "status-badge checking";
-  statusLabel.textContent = "Checking...";
+  statusLabel.textContent = "Checking\u2026";
 
-  for (const baseUrl of uniqueUrls) {
+  for (const baseUrl of candidateUrls) {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 2000);
-
-      const response = await fetch(`${baseUrl}/health`, {
-        method: "GET",
-        signal: controller.signal
-      });
+      const response = await fetch(`${baseUrl}/health`, { method: "GET", signal: controller.signal });
       clearTimeout(timeoutId);
 
       if (response.ok) {
@@ -127,209 +184,419 @@ async function checkServerStatus() {
         statusBadge.className = "status-badge online";
         statusLabel.textContent = `Online (${data.device || "AI"})`;
         statusBadge.title = `Model: ${data.model} | Device: ${data.device} | URL: ${baseUrl}`;
-        if (inputServerUrl.value !== baseUrl) {
-          inputServerUrl.value = baseUrl;
-        }
+        if (inputServerUrl.value.trim().replace(/\/+$/, "") !== baseUrl) inputServerUrl.value = baseUrl;
         return;
       }
-    } catch (e) {
-      // Try next
-    }
+    } catch (e) { /* try next */ }
   }
 
   isServerOnline = false;
   statusBadge.className = "status-badge offline";
   statusLabel.textContent = "Offline";
-  statusBadge.title = "Cannot connect to AI backend. Is server running?";
+  statusBadge.title = "Cannot reach AI backend. Run backend\\run_server.bat";
 }
 
-// Auto-check status
 checkServerStatus();
 setInterval(checkServerStatus, 12000);
 btnRefreshStatus.addEventListener("click", checkServerStatus);
-inputServerUrl.addEventListener("change", checkServerStatus);
+inputServerUrl.addEventListener("change", () => {
+  currentPortraitBlob = null;
+  checkServerStatus();
+});
 
+/* ============================== VIEWPORT SIZING ============================== */
+function resizeViewport(imgW, imgH) {
+  const boxW = Math.max(220, Math.floor(canvasWrapper.clientWidth || 300));
+  let cw = boxW;
+  let chh = imgW > 0 ? Math.round(cw * (imgH / imgW)) : 240;
+  chh = Math.max(170, Math.min(chh, 480));
+  previewCanvas.width = cw;
+  previewCanvas.height = chh;
+}
 
-/**
- * Layer 3: Interactive Live Preview HTML5 Canvas Rendering Engine
- */
+window.addEventListener("resize", () => {
+  if (currentPortraitImage) {
+    resizeViewport(currentPortraitImage.naturalWidth || currentPortraitImage.width,
+                   currentPortraitImage.naturalHeight || currentPortraitImage.height);
+    renderCanvas();
+  }
+});
+
+/* ============================== CANVAS RENDERING ============================== */
+function drawChip(ctx, x, y, text, alignRight = false) {
+  ctx.font = "700 9px Segoe UI, sans-serif";
+  const padX = 6, padY = 4;
+  const tw = ctx.measureText(text).width;
+  const w = tw + padX * 2;
+  const h = 14;
+  const rx = alignRight ? x - w : x;
+  ctx.fillStyle = "rgba(0,0,0,0.62)";
+  ctx.beginPath();
+  if (ctx.roundRect) { ctx.roundRect(rx, y, w, h, 3); } else { ctx.rect(rx, y, w, h); }
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, rx + padX, y + h / 2 + 0.5);
+}
+
+function drawSplitDivider(ctx, splitX) {
+  const ch = previewCanvas.height;
+  ctx.strokeStyle = "rgba(255,255,255,0.9)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(splitX, 0);
+  ctx.lineTo(splitX, ch);
+  ctx.stroke();
+
+  const cy = Math.round(ch / 2);
+  ctx.beginPath();
+  ctx.arc(splitX, cy, 11, 0, Math.PI * 2);
+  ctx.fillStyle = "#ffffff";
+  ctx.fill();
+  ctx.strokeStyle = "rgba(59,130,246,0.9)";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  ctx.fillStyle = "#1d4ed8";
+  ctx.beginPath();
+  ctx.moveTo(splitX - 5, cy);
+  ctx.lineTo(splitX - 1.5, cy - 3.5);
+  ctx.lineTo(splitX - 1.5, cy + 3.5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(splitX + 5, cy);
+  ctx.lineTo(splitX + 1.5, cy - 3.5);
+  ctx.lineTo(splitX + 1.5, cy + 3.5);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function splitCanvasX() {
+  if (!viewGeom) return previewCanvas.width / 2;
+  return Math.round(viewGeom.offX + viewGeom.renderW * splitPos);
+}
+
 function renderCanvas() {
   if (!currentPortraitImage) return;
-
-  const canvas = previewCanvas;
-  const ctx = canvas.getContext("2d");
-  const cw = canvas.width;
-  const ch = canvas.height;
-
+  const ctx = previewCanvas.getContext("2d");
+  const cw = previewCanvas.width;
+  const ch = previewCanvas.height;
   ctx.clearRect(0, 0, cw, ch);
 
-  // Compute aspect ratio scaling
   const imgW = currentPortraitImage.naturalWidth || currentPortraitImage.width;
   const imgH = currentPortraitImage.naturalHeight || currentPortraitImage.height;
   const scale = Math.min(cw / imgW, ch / imgH);
   const renderW = imgW * scale;
   const renderH = imgH * scale;
-  const offsetX = (cw - renderW) / 2;
-  const offsetY = (ch - renderH) / 2;
+  const offX = (cw - renderW) / 2;
+  const offY = (ch - renderH) / 2;
+  viewGeom = { scale, offX, offY, renderW, renderH };
 
-  // 1. Draw Base Portrait
-  ctx.drawImage(currentPortraitImage, offsetX, offsetY, renderW, renderH);
+  // 1. BEFORE base
+  ctx.drawImage(currentPortraitImage, offX, offY, renderW, renderH);
 
-  // 2. Draw Skin Mask Overlay (Cyan tint)
-  if (chkShowSkin.checked && currentSkinMaskImage) {
-    ctx.save();
-    // Create temporary offscreen canvas for skin coloring
-    const offCanvas = document.createElement("canvas");
-    offCanvas.width = cw;
-    offCanvas.height = ch;
-    const offCtx = offCanvas.getContext("2d");
-
-    offCtx.drawImage(currentSkinMaskImage, offsetX, offsetY, renderW, renderH);
-    offCtx.globalCompositeOperation = "source-in";
-    offCtx.fillStyle = "rgba(6, 182, 212, 0.35)"; // Cyan overlay
-    offCtx.fillRect(0, 0, cw, ch);
-
-    ctx.drawImage(offCanvas, 0, 0);
-    ctx.restore();
+  // 2. AFTER region
+  let overlayLimitX = cw;
+  if (viewMode === "after") {
+    if (resultImage) {
+      ctx.drawImage(resultImage, offX, offY, renderW, renderH);
+      overlayLimitX = -1;
+    }
+  } else if (viewMode === "split") {
+    const splitX = splitCanvasX();
+    if (resultImage) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(splitX, 0, cw - splitX, ch);
+      ctx.clip();
+      ctx.drawImage(resultImage, offX, offY, renderW, renderH);
+      ctx.restore();
+      overlayLimitX = splitX;
+    }
   }
 
-  // 3. Draw Pimple Blobs Overlay
-  let activeCount = 0;
-  if (currentBlobs && currentBlobs.length > 0) {
-    for (const blob of currentBlobs) {
-      const cx = blob.centroid[0] * scale + offsetX;
-      const cy = blob.centroid[1] * scale + offsetY;
-      const r = Math.max(3, blob.radius * scale);
+  // 3. Detection overlays (clipped to the BEFORE side)
+  if (overlayLimitX > 0) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, overlayLimitX, ch);
+    ctx.clip();
 
-      if (blob.active !== false) {
-        activeCount++;
-        if (chkShowPimples.checked) {
-          // Outer glow halo
+    if (chkShowSkin.checked && currentSkinMaskImage) {
+      const offCanvas = document.createElement("canvas");
+      offCanvas.width = cw;
+      offCanvas.height = ch;
+      const offCtx = offCanvas.getContext("2d");
+      offCtx.drawImage(currentSkinMaskImage, offX, offY, renderW, renderH);
+      offCtx.globalCompositeOperation = "source-in";
+      offCtx.fillStyle = "rgba(6, 182, 212, 0.32)";
+      offCtx.fillRect(0, 0, cw, ch);
+      ctx.drawImage(offCanvas, 0, 0);
+    }
+
+    if (chkShowPimples.checked && currentBlobs.length > 0) {
+      for (const blob of currentBlobs) {
+        const bcx = blob.centroid[0] * scale + offX;
+        const bcy = blob.centroid[1] * scale + offY;
+        const br = Math.max(3, blob.radius * scale);
+        if (bcx > overlayLimitX + br) continue;
+
+        if (blob.active !== false) {
           ctx.beginPath();
-          ctx.arc(cx, cy, r + 2, 0, Math.PI * 2);
-          ctx.fillStyle = "rgba(244, 63, 94, 0.25)";
+          ctx.arc(bcx, bcy, br + 2, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(244,63,94,0.22)";
           ctx.fill();
-
-          // Stroke circle
           ctx.beginPath();
-          ctx.arc(cx, cy, r, 0, Math.PI * 2);
+          ctx.arc(bcx, bcy, br, 0, Math.PI * 2);
           ctx.strokeStyle = "#f43f5e";
-          ctx.lineWidth = 1.8;
+          ctx.lineWidth = 1.6;
           ctx.stroke();
-
-          // Center indicator
           ctx.beginPath();
-          ctx.arc(cx, cy, 1.5, 0, Math.PI * 2);
+          ctx.arc(bcx, bcy, 1.4, 0, Math.PI * 2);
           ctx.fillStyle = "#ffffff";
           ctx.fill();
-        }
-      } else {
-        // Inactive / ignored blob
-        if (chkShowPimples.checked) {
+        } else {
           ctx.beginPath();
-          ctx.arc(cx, cy, r, 0, Math.PI * 2);
-          ctx.strokeStyle = "rgba(161, 161, 170, 0.5)";
-          ctx.lineWidth = 1.2;
+          ctx.arc(bcx, bcy, br, 0, Math.PI * 2);
+          ctx.strokeStyle = "rgba(161,161,170,0.55)";
+          ctx.lineWidth = 1.1;
           ctx.setLineDash([2, 2]);
           ctx.stroke();
           ctx.setLineDash([]);
         }
       }
     }
+    ctx.restore();
   }
 
+  // 4. Split UI chrome
+  if (viewMode === "split") {
+    const splitX = splitCanvasX();
+    if (splitX > 52) drawChip(ctx, 8, 8, "BEFORE");
+    if (cw - splitX > 58 && resultImage) drawChip(ctx, cw - 8, 8, "AFTER", true);
+    drawSplitDivider(ctx, splitX);
+  }
+
+  const activeCount = currentBlobs.filter(b => b.active !== false).length;
   blobCounter.textContent = `${activeCount} Spots`;
 }
 
-/**
- * Layer 4 Refinement: Canvas Click Interaction
- */
-previewCanvas.addEventListener("click", (e) => {
-  if (!currentPortraitImage) return;
-
+/* ============================== VIEWPORT INTERACTION ============================== */
+function canvasPoint(e) {
   const rect = previewCanvas.getBoundingClientRect();
-  const clickX = e.clientX - rect.left;
-  const clickY = e.clientY - rect.top;
+  return [e.clientX - rect.left, e.clientY - rect.top];
+}
 
-  const imgW = currentPortraitImage.naturalWidth || currentPortraitImage.width;
-  const imgH = currentPortraitImage.naturalHeight || currentPortraitImage.height;
-  const scale = Math.min(previewCanvas.width / imgW, previewCanvas.height / imgH);
-  const offsetX = (previewCanvas.width - imgW * scale) / 2;
-  const offsetY = (previewCanvas.height - imgH * scale) / 2;
+function imagePoint(px, py) {
+  if (!viewGeom) return null;
+  return [(px - viewGeom.offX) / viewGeom.scale, (py - viewGeom.offY) / viewGeom.scale];
+}
 
-  // Convert click to original image pixel coordinates
-  const origX = (clickX - offsetX) / scale;
-  const origY = (clickY - offsetY) / scale;
-
-  if (origX < 0 || origX >= imgW || origY < 0 || origY >= imgH) return;
-
-  if (activeTool === "eyedropper") {
-    // Sample Skin Tone at pixel
-    const tempC = document.createElement("canvas");
-    tempC.width = imgW;
-    tempC.height = imgH;
-    const tempCtx = tempC.getContext("2d");
-    tempCtx.drawImage(currentPortraitImage, 0, 0);
-    const pixel = tempCtx.getImageData(Math.floor(origX), Math.floor(origY), 1, 1).data;
-    const rgb = [pixel[0], pixel[1], pixel[2]];
-
-    sampledBaseTone.rgb = rgb;
-    const hex = `#${((1 << 24) + (rgb[0] << 16) + (rgb[1] << 8) + rgb[2]).toString(16).slice(1)}`;
-    toneSwatch.style.backgroundColor = hex;
-    setLog(`Sampled skin tone: ${hex} at (${Math.round(origX)}, ${Math.round(origY)})`, "success");
-
-  } else {
-    // Pimple Tool: Toggle nearest blob or add new
-    let hitIndex = -1;
-    let minDistance = Infinity;
-
-    for (let i = 0; i < currentBlobs.length; i++) {
-      const b = currentBlobs[i];
-      const dist = Math.hypot(origX - b.centroid[0], origY - b.centroid[1]);
-      const effectiveRadius = Math.max(10, b.radius + 6);
-      if (dist <= effectiveRadius && dist < minDistance) {
-        minDistance = dist;
-        hitIndex = i;
-      }
-    }
-
-    if (hitIndex !== -1) {
-      // Toggle existing blob
-      currentBlobs[hitIndex].active = !currentBlobs[hitIndex].active;
-      const state = currentBlobs[hitIndex].active ? "enabled" : "ignored";
-      setLog(`Blemish #${currentBlobs[hitIndex].id} ${state}.`, "info");
-    } else {
-      // Add new blob
-      const newId = currentBlobs.length > 0 ? Math.max(...currentBlobs.map(b => b.id)) + 1 : 1;
-      const newBlob = {
-        id: newId,
-        centroid: [Math.round(origX), Math.round(origY)],
-        bbox: [Math.max(0, Math.round(origX - 8)), Math.max(0, Math.round(origY - 8)), Math.min(imgW, Math.round(origX + 8)), Math.min(imgH, Math.round(origY + 8))],
-        radius: 7,
-        confidence: 1.0,
-        active: true,
-        label: "manual",
-        source: "click"
-      };
-      currentBlobs.push(newBlob);
-      setLog(`Added new blemish #${newId} at (${Math.round(origX)}, ${Math.round(origY)}).`, "success");
-    }
-
-    renderCanvas();
+previewCanvas.addEventListener("mousedown", (e) => {
+  if (!currentPortraitImage) return;
+  const [px, py] = canvasPoint(e);
+  mouseDownInfo = { px, py, moved: false };
+  if (viewMode === "split" && Math.abs(px - splitCanvasX()) <= 12) {
+    draggingSplit = true;
+    previewCanvas.style.cursor = "ew-resize";
   }
 });
 
+previewCanvas.addEventListener("mousemove", (e) => {
+  if (!currentPortraitImage) return;
+  const [px, py] = canvasPoint(e);
 
-/**
- * Helper: Export full portrait snapshot from Photoshop
- */
+  if (draggingSplit && viewGeom) {
+    splitPos = Math.max(0.03, Math.min(0.97, (px - viewGeom.offX) / viewGeom.renderW));
+    renderCanvas();
+    return;
+  }
+  if (mouseDownInfo) {
+    if (Math.hypot(px - mouseDownInfo.px, py - mouseDownInfo.py) > 4) mouseDownInfo.moved = true;
+    return;
+  }
+  const nearSplit = viewMode === "split" && Math.abs(px - splitCanvasX()) <= 12;
+  previewCanvas.style.cursor = nearSplit ? "ew-resize" : (activeTool === "eyedropper" ? "cell" : "crosshair");
+});
+
+previewCanvas.addEventListener("mouseup", (e) => {
+  if (draggingSplit) {
+    draggingSplit = false;
+    mouseDownInfo = null;
+    return;
+  }
+  if (!mouseDownInfo || mouseDownInfo.moved || !viewGeom) {
+    mouseDownInfo = null;
+    return;
+  }
+  const [px, py] = canvasPoint(e);
+  const pt = imagePoint(px, py);
+  mouseDownInfo = null;
+  if (!pt) return;
+  handleToolClick(pt[0], pt[1], px, py);
+});
+
+previewCanvas.addEventListener("mouseleave", () => {
+  draggingSplit = false;
+  mouseDownInfo = null;
+});
+
+function handleToolClick(origX, origY, px, py) {
+  const imgW = currentPortraitImage.naturalWidth || currentPortraitImage.width;
+  const imgH = currentPortraitImage.naturalHeight || currentPortraitImage.height;
+  origX = Math.max(0, Math.min(imgW - 1, Math.round(origX)));
+  origY = Math.max(0, Math.min(imgH - 1, Math.round(origY)));
+
+  if (activeTool === "eyedropper") {
+    if (!portraitDataCanvas) return;
+    const pctx = portraitDataCanvas.getContext("2d");
+    const d = pctx.getImageData(Math.floor(origX), Math.floor(origY), 1, 1).data;
+    const rgb = [d[0], d[1], d[2]];
+    sampledBaseTone.rgb = rgb;
+    sampledBaseTone.lab = rgbToLab(rgb[0], rgb[1], rgb[2]);
+    updateToneSwatch(rgb);
+    setLog(`Base tone sampled: ${rgbToHex(rgb[0], rgb[1], rgb[2])}. Preview updating\u2026`, "success");
+    schedulePreview(350);
+    return;
+  }
+
+  // Blemish tool: toggle nearest blob, or add a new one
+  const scale = viewGeom ? viewGeom.scale : 1;
+  let hitIndex = -1;
+  let minDist = Infinity;
+  for (let i = 0; i < currentBlobs.length; i++) {
+    const b = currentBlobs[i];
+    const bcx = b.centroid[0] * scale + (viewGeom ? viewGeom.offX : 0);
+    const bcy = b.centroid[1] * scale + (viewGeom ? viewGeom.offY : 0);
+    const dist = Math.hypot(px - bcx, py - bcy);
+    const effectiveRadius = Math.max(10, b.radius * scale + 6);
+    if (dist <= effectiveRadius && dist < minDist) {
+      minDist = dist;
+      hitIndex = i;
+    }
+  }
+
+  if (hitIndex !== -1) {
+    currentBlobs[hitIndex].active = !currentBlobs[hitIndex].active;
+    setLog(currentBlobs[hitIndex].active
+      ? `Spot #${currentBlobs[hitIndex].id} will be removed.`
+      : `Spot #${currentBlobs[hitIndex].id} ignored.`, "info");
+  } else {
+    const newId = currentBlobs.length > 0 ? Math.max(...currentBlobs.map(b => b.id)) + 1 : 1;
+    const radius = Math.max(8, Math.round(imgW / 240));
+    currentBlobs.push({
+      id: newId,
+      centroid: [origX, origY],
+      bbox: [Math.max(0, origX - radius), Math.max(0, origY - radius), Math.min(imgW, origX + radius), Math.min(imgH, origY + radius)],
+      radius: radius,
+      confidence: 1.0,
+      active: true,
+      label: "pimple",
+      source: "manual_click"
+    });
+    setLog(`Missed spot added at (${origX}, ${origY}).`, "success");
+  }
+
+  renderCanvas();
+  schedulePreview(400);
+}
+
+/* Tool + view mode switching */
+toolPimple.addEventListener("click", () => {
+  activeTool = "pimple";
+  toolPimple.classList.add("active");
+  toolEyedropper.classList.remove("active");
+});
+
+toolEyedropper.addEventListener("click", () => {
+  activeTool = "eyedropper";
+  toolEyedropper.classList.add("active");
+  toolPimple.classList.remove("active");
+});
+
+function setViewMode(mode) {
+  viewMode = mode;
+  btnModeBefore.classList.toggle("active", mode === "before");
+  btnModeSplit.classList.toggle("active", mode === "split");
+  btnModeAfter.classList.toggle("active", mode === "after");
+  renderCanvas();
+}
+btnModeBefore.addEventListener("click", () => setViewMode("before"));
+btnModeSplit.addEventListener("click", () => setViewMode("split"));
+btnModeAfter.addEventListener("click", () => setViewMode("after"));
+
+chkShowPimples.addEventListener("change", renderCanvas);
+chkShowSkin.addEventListener("change", renderCanvas);
+
+/* ============================== LIVE RESULT PREVIEW (Layer 3) ============================== */
+function schedulePreview(delay = 600) {
+  if (!currentPortraitBlob) return;
+  setPreviewStatus("stale");
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(runPreview, delay);
+}
+
+async function runPreview() {
+  if (!currentPortraitBlob || !isServerOnline) return;
+  if (previewBusy) { previewQueued = true; return; }
+
+  const seq = ++previewSeq;
+  previewBusy = true;
+  setPreviewStatus("updating");
+
+  try {
+    const formData = new FormData();
+    formData.append("image", currentPortraitBlob, "portrait.png");
+    formData.append("blobs_json", JSON.stringify(currentBlobs));
+    if (currentSkinMaskBlob) formData.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
+    formData.append("include_heal", chkEnableHeal.checked ? "true" : "false");
+    formData.append("include_smooth", chkEnableSmooth.checked ? "true" : "false");
+    formData.append("include_lighten", chkEnableLighten.checked ? "true" : "false");
+    formData.append("smooth_strength", (parseInt(sliderSmoothStrength.value, 10) / 100).toString());
+    formData.append("texture_keep", (parseInt(sliderTextureKeep.value, 10) / 100).toString());
+    formData.append("strength", (parseInt(sliderStrength.value, 10) / 100).toString());
+    formData.append("texture_blend", (parseInt(sliderTexture.value, 10) / 100).toString());
+    formData.append("feather_radius", sliderFeather.value);
+    formData.append("grain_intensity", (parseInt(sliderGrain.value, 10) / 100).toString());
+    formData.append("base_tone_lab", JSON.stringify(sampledBaseTone.lab));
+    formData.append("max_size", "720");
+
+    const res = await fetch(`${getServerUrl()}/preview`, { method: "POST", body: formData });
+    if (!res.ok) throw new Error(`Preview failed (${res.status}): ${await res.text()}`);
+
+    const blob = await res.blob();
+    const imgUrl = URL.createObjectURL(blob);
+    const img = await loadImage(imgUrl);
+    if (seq !== previewSeq) return; // a newer request superseded this one
+
+    resultImage = img;
+    setPreviewStatus("live");
+    renderCanvas();
+
+  } catch (err) {
+    console.error("Preview error:", err);
+    if (seq === previewSeq) {
+      setPreviewStatus("error");
+      setLog(err.message, "error");
+    }
+  } finally {
+    previewBusy = false;
+    if (previewQueued) {
+      previewQueued = false;
+      schedulePreview(50);
+    }
+  }
+}
+
+/* ============================== PHOTOSHOP EXPORT SNAPSHOT ============================== */
 async function exportFullPortrait() {
+  const origDocId = app.activeDocument ? app.activeDocument.id : null;
   const tempFolder = await localFileSystem.getTemporaryFolder();
   const portraitFile = await tempFolder.createFile("portrait_temp.png", { overwrite: true });
   const portraitToken = localFileSystem.createSessionToken(portraitFile);
 
   await core.executeAsModal(async () => {
-    // Duplicate doc
     await action.batchPlay([
       {
         _obj: "duplicate",
@@ -339,174 +606,256 @@ async function exportFullPortrait() {
     ], {});
 
     const dupDoc = app.activeDocument;
-    // Hide any previous AI retouch layers to capture pure original
     dupDoc.layers.forEach(l => {
-      if (l.name.startsWith("AI ") || l.name.includes("Mask")) {
-        l.visible = false;
-      }
+      if (l.name.startsWith("AI ")) l.visible = false;
     });
 
-    // Save PNG quick export
-    await action.batchPlay([
-      {
-        _obj: "save",
-        as: {
-          _obj: "PNGFormat",
-          method: { _enum: "PNGMethod", _value: "quick" }
-        },
-        in: { _path: portraitToken, _kind: "local" },
-        saveStage: { _enum: "saveStageType", _value: "saveBegin" }
+    try {
+      await action.batchPlay([
+        {
+          _obj: "save",
+          as: { _obj: "PNGFormat", method: { _enum: "PNGMethod", _value: "quick" } },
+          in: { _path: portraitToken, _kind: "local" },
+          saveStage: { _enum: "saveStageType", _value: "saveBegin" }
+        }
+      ], {});
+    } finally {
+      await action.batchPlay([
+        { _obj: "close", saving: { _enum: "yesNo", _value: "no" } }
+      ], {});
+      if (origDocId !== null && app.activeDocument && app.activeDocument.id !== origDocId) {
+        action.batchPlay([
+          { _obj: "select", _target: [{ _ref: "document", _enum: "id", _value: origDocId }] }
+        ], {}).catch(() => {});
       }
-    ], {});
-
-    // Close duplicate
-    await action.batchPlay([
-      {
-        _obj: "close",
-        saving: { _enum: "yesNo", _value: "no" }
-      }
-    ], {});
+    }
   }, { commandName: "Export Portrait Snapshot" });
 
   const rawBytes = await portraitFile.read({ format: uxp.storage.formats.binary });
   return new Blob([rawBytes], { type: "image/png" });
 }
 
+/* ============================== LAYER PLACEMENT HELPERS ============================== */
+async function placePatchAsLayer(pngBuffer, fileName, layerName) {
+  const tempFolder = await localFileSystem.getTemporaryFolder();
+  const patchFile = await tempFolder.createFile(fileName, { overwrite: true });
+  await patchFile.write(pngBuffer, { format: uxp.storage.formats.binary });
+  const patchToken = localFileSystem.createSessionToken(patchFile);
 
-/**
- * 1. Auto-Detect Portrait Action
- */
-btnAutoDetect.addEventListener("click", async () => {
-  if (isProcessing) return;
+  await core.executeAsModal(async () => {
+    await action.batchPlay([
+      {
+        _obj: "placeEvent",
+        target: { _path: patchToken, _kind: "local" },
+        _options: { dialogOptions: "dontDisplay" }
+      }
+    ], {});
+    const placed = app.activeDocument.activeLayers[0];
+    placed.name = layerName;
+  }, { commandName: `Place ${layerName}` });
+}
 
+async function groupRetouchLayers(groupName, layerNames) {
+  if (!layerNames || layerNames.length < 2) return;
+  await core.executeAsModal(async () => {
+    await action.batchPlay([
+      {
+        _obj: "select",
+        _target: layerNames.map(n => ({ _ref: "layer", _enum: "name", _value: n })),
+        makeVisible: false,
+        _options: { dialogOptions: "dontDisplay" }
+      },
+      {
+        _obj: "make",
+        _target: [{ _ref: "layerSection" }],
+        from: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }],
+        name: groupName,
+        _options: { dialogOptions: "dontDisplay" }
+      }
+    ], {});
+  }, { commandName: `Group ${groupName}` });
+}
+
+/* ============================== STEP 1: ANALYZE (Layers 1 + 2) ============================== */
+async function runAnalysis(isUserInitiated) {
   if (!isServerOnline) {
     await checkServerStatus();
-    if (!isServerOnline) {
-      setLog("AI backend is offline. Please run `run_server.bat`.", "error");
-      return;
+    if (!isServerOnline) throw new Error("AI backend offline. Start it with backend\\run_server.bat");
+  }
+  const doc = app.activeDocument;
+  if (!doc) throw new Error("No active document. Open a portrait photo in Photoshop first.");
+
+  if (isUserInitiated) setLog("Capturing snapshot \u0026 running AI segmentation\u2026", "info");
+  const portraitBlob = await exportFullPortrait();
+  currentPortraitBlob = portraitBlob;
+
+  const imgUrl = URL.createObjectURL(portraitBlob);
+  currentPortraitImage = await loadImage(imgUrl);
+
+  // Native-res offscreen copy for instant pixel sampling
+  portraitDataCanvas = document.createElement("canvas");
+  portraitDataCanvas.width = currentPortraitImage.naturalWidth;
+  portraitDataCanvas.height = currentPortraitImage.naturalHeight;
+  portraitDataCanvas.getContext("2d").drawImage(currentPortraitImage, 0, 0);
+
+  resizeViewport(currentPortraitImage.naturalWidth, currentPortraitImage.naturalHeight);
+  canvasEmptyOverlay.classList.add("hidden");
+  renderCanvas();
+
+  const formData = new FormData();
+  formData.append("image", portraitBlob, "portrait.png");
+  formData.append("sensitivity", (parseInt(sliderSensitivity.value, 10) / 100).toString());
+  formData.append("detect_pimples", "true");
+  formData.append("detect_skin", "true");
+  formData.append("include_neck", chkIncludeNeck.checked ? "true" : "false");
+  formData.append("feather_radius", sliderFeather.value);
+
+  const res = await fetch(`${getServerUrl()}/analyze`, { method: "POST", body: formData });
+  if (!res.ok) throw new Error(`Analyze failed (${res.status}): ${await res.text()}`);
+  const data = await res.json();
+
+  // Merge: fresh auto blobs + previously added manual/text blobs that survive
+  const previousManual = currentBlobs.filter(b =>
+    ["manual_click", "manual", "text_grounding"].includes(b.source || ""));
+  const newAuto = data.blobs || [];
+  const merged = [...newAuto];
+  let nextId = merged.length > 0 ? Math.max(...merged.map(b => b.id)) + 1 : 1;
+  for (const mb of previousManual) {
+    const covered = newAuto.some(nb =>
+      Math.hypot(nb.centroid[0] - mb.centroid[0], nb.centroid[1] - mb.centroid[1]) < (nb.radius * 1.6));
+    if (!covered) {
+      const copy = Object.assign({}, mb, { id: nextId++ });
+      merged.push(copy);
     }
   }
+  currentBlobs = merged;
 
+  sampledBaseTone = {
+    rgb: data.base_tone_rgb || [230, 180, 150],
+    lab: data.base_tone_lab || [185.7, 141.0, 145.0]
+  };
+  updateToneSwatch(sampledBaseTone.rgb);
+
+  currentSkinMaskImage = null;
+  currentSkinMaskBlob = null;
+  if (data.skin_mask_base64) {
+    currentSkinMaskBlob = dataUrlToBlob(data.skin_mask_base64);
+    currentSkinMaskImage = await loadImage(data.skin_mask_base64);
+  }
+
+  resultImage = null;
+  renderCanvas();
+  setLog(`Detected ${newAuto.length} spots (${data.skin_percentage}% skin) in ${data.process_time_ms}ms. Rendering result preview\u2026`, "success");
+
+  // Immediately show the retouched look on the AFTER side
+  await runPreview();
+  return data;
+}
+
+btnAutoDetect.addEventListener("click", async () => {
+  if (isProcessing) return;
   isProcessing = true;
   btnAutoDetect.disabled = true;
   detectSpinner.classList.add("active");
-  setLog("Exporting portrait snapshot and running Layer 1 & 2 AI segmentation...", "info");
+  detectBtnText.textContent = "Analyzing\u2026";
+  setPreviewStatus("analyzing");
 
   try {
-    const doc = app.activeDocument;
-    if (!doc) {
-      throw new Error("No active document open. Please open a portrait photo.");
-    }
-
-    const portraitBlob = await exportFullPortrait();
-    lastPortraitBlob = portraitBlob;
-
-    // Load as Image element for canvas
-    const imgUrl = URL.createObjectURL(portraitBlob);
-    const imgElem = new Image();
-    await new Promise((resolve, reject) => {
-      imgElem.onload = resolve;
-      imgElem.onerror = reject;
-      imgElem.src = imgUrl;
-    });
-    currentPortraitImage = imgElem;
-
-    // Adjust canvas resolution
-    previewCanvas.width = 300;
-    previewCanvas.height = Math.round(300 * (imgElem.naturalHeight / imgElem.naturalWidth));
-
-    // Send to /analyze endpoint
-    const formData = new FormData();
-    formData.append("image", portraitBlob, "portrait.png");
-    formData.append("sensitivity", (parseInt(sliderSensitivity.value, 10) / 100).toString());
-    formData.append("detect_pimples", "true");
-    formData.append("detect_skin", "true");
-    formData.append("include_neck", chkIncludeNeck.checked ? "true" : "false");
-    formData.append("feather_radius", sliderFeather.value);
-
-    const res = await fetch(`${getServerUrl()}/analyze`, {
-      method: "POST",
-      body: formData
-    });
-
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`Analyze failed (${res.status}): ${errText}`);
-    }
-
-    const data = await res.json();
-    currentBlobs = data.blobs || [];
-    sampledBaseTone = {
-      rgb: data.base_tone_rgb || [230, 180, 150],
-      lab: data.base_tone_lab || [180.0, 140.0, 145.0]
-    };
-
-    // Update skin tone swatch
-    const rgb = sampledBaseTone.rgb;
-    const hex = `#${((1 << 24) + (rgb[0] << 16) + (rgb[1] << 8) + rgb[2]).toString(16).slice(1)}`;
-    toneSwatch.style.backgroundColor = hex;
-
-    // Load skin mask image
-    if (data.skin_mask_base64) {
-      const skinImg = new Image();
-      await new Promise((resolve) => {
-        skinImg.onload = resolve;
-        skinImg.src = data.skin_mask_base64;
-      });
-      currentSkinMaskImage = skinImg;
-    }
-
-    canvasEmptyOverlay.classList.add("hidden");
-    renderCanvas();
-
-    setLog(`Auto-detection complete in ${data.process_time_ms}ms: ${currentBlobs.length} blemish spots found, ${data.skin_percentage}% skin coverage.`, "success");
-
+    await runAnalysis(true);
   } catch (err) {
-    console.error("Auto-detect error:", err);
+    console.error("Analyze error:", err);
+    setPreviewStatus("error");
     setLog(err.message, "error");
   } finally {
     isProcessing = false;
     btnAutoDetect.disabled = false;
     detectSpinner.classList.remove("active");
+    detectBtnText.textContent = "1. Analyze Portrait";
   }
 });
 
+/* Sensitivity / neck changes re-run detection (preserving manual edits) */
+function scheduleReanalyze(delay = 1200) {
+  if (!currentPortraitBlob) return;
+  clearTimeout(analyzeTimer);
+  analyzeTimer = setTimeout(async () => {
+    if (isProcessing) return;
+    isProcessing = true;
+    detectSpinner.classList.add("active");
+    setPreviewStatus("analyzing");
+    try {
+      await runAnalysis(false);
+    } catch (err) {
+      setPreviewStatus("error");
+      setLog(err.message, "error");
+    } finally {
+      isProcessing = false;
+      detectSpinner.classList.remove("active");
+    }
+  }, delay);
+}
 
-/**
- * Layer 4: AI Natural Language Refinement
- */
+/* ============================== CONTROL WIRING ============================== */
+sliderTexture.addEventListener("input", () => {
+  valTexture.textContent = `${sliderTexture.value}%`;
+  schedulePreview(650);
+});
+sliderFeather.addEventListener("input", () => {
+  valFeather.textContent = `${sliderFeather.value}px`;
+  schedulePreview(650);
+});
+sliderGrain.addEventListener("input", () => {
+  valGrain.textContent = `${sliderGrain.value}%`;
+  schedulePreview(650);
+});
+sliderStrength.addEventListener("input", () => {
+  valStrength.textContent = `${sliderStrength.value}%`;
+  schedulePreview(650);
+});
+sliderSmoothStrength.addEventListener("input", () => {
+  valSmoothStrength.textContent = `${sliderSmoothStrength.value}%`;
+  schedulePreview(650);
+});
+sliderTextureKeep.addEventListener("input", () => {
+  valTextureKeep.textContent = `${sliderTextureKeep.value}%`;
+  schedulePreview(650);
+});
+sliderSensitivity.addEventListener("input", () => {
+  valSensitivity.textContent = `${sliderSensitivity.value}%`;
+  scheduleReanalyze(1400);
+});
+chkIncludeNeck.addEventListener("change", () => scheduleReanalyze(900));
+chkEnableHeal.addEventListener("change", () => schedulePreview(250));
+chkEnableSmooth.addEventListener("change", () => schedulePreview(250));
+chkEnableLighten.addEventListener("change", () => schedulePreview(250));
+
+/* ============================== LAYER 4: AI TEXT REFINEMENT ============================== */
 btnSendPrompt.addEventListener("click", async () => {
   const promptText = inputPrompt.value.trim();
   if (!promptText) return;
-  if (!lastPortraitBlob) {
-    setLog("Please click 'Auto-Detect Portrait' first.", "warning");
+  if (!currentPortraitBlob) {
+    setLog("Click 'Analyze Portrait' first.", "warning");
     return;
   }
 
-  setLog(`Sending instruction to Gemini AI: "${promptText}"...`, "info");
+  setLog(`AI instruction: "${promptText}"\u2026`, "info");
   btnSendPrompt.disabled = true;
 
   try {
     const formData = new FormData();
-    formData.append("image", lastPortraitBlob, "portrait.png");
+    formData.append("image", currentPortraitBlob, "portrait.png");
     formData.append("prompt", promptText);
     formData.append("blobs_json", JSON.stringify(currentBlobs));
 
-    const res = await fetch(`${getServerUrl()}/refine-text`, {
-      method: "POST",
-      body: formData
-    });
-
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`AI Refinement error: ${errText}`);
-    }
+    const res = await fetch(`${getServerUrl()}/refine-text`, { method: "POST", body: formData });
+    if (!res.ok) throw new Error(`AI refinement failed: ${await res.text()}`);
 
     const data = await res.json();
     currentBlobs = data.blobs || currentBlobs;
     renderCanvas();
-    setLog(`AI refinement applied (${data.action}): Updated blemish selection.`, "success");
+    setLog(`AI refinement applied (${data.action}). Preview updating\u2026`, "success");
     inputPrompt.value = "";
+    schedulePreview(300);
 
   } catch (err) {
     console.error("Refine text error:", err);
@@ -516,26 +865,22 @@ btnSendPrompt.addEventListener("click", async () => {
   }
 });
 
-
-/**
- * Layer 5: Apply AI Retouch (Remove Pimples + Lighten Skin)
- */
+/* ============================== STEP 2: APPLY TO PHOTOSHOP ============================== */
 btnApplyAll.addEventListener("click", async () => {
   if (isProcessing) return;
 
   if (!isServerOnline) {
     await checkServerStatus();
     if (!isServerOnline) {
-      setLog("AI backend is offline. Please run `run_server.bat`.", "error");
+      setLog("AI backend offline. Start it with backend\\run_server.bat", "error");
       return;
     }
   }
-
   const doHeal = chkEnableHeal.checked;
+  const doSmooth = chkEnableSmooth.checked;
   const doLighten = chkEnableLighten.checked;
-
-  if (!doHeal && !doLighten) {
-    setLog("Please enable at least one feature (Remove Pimples or Lighten Skin).", "warning");
+  if (!doHeal && !doSmooth && !doLighten) {
+    setLog("Enable at least one feature first.", "warning");
     return;
   }
 
@@ -546,110 +891,85 @@ btnApplyAll.addEventListener("click", async () => {
 
   try {
     const doc = app.activeDocument;
-    if (!doc) {
-      throw new Error("No active document open in Photoshop.");
-    }
+    if (!doc) throw new Error("No active document open in Photoshop.");
 
-    const tempFolder = await localFileSystem.getTemporaryFolder();
-
-    // 1. Export fresh portrait snapshot
-    setLog("Capturing portrait snapshot for AI application...", "info");
+    setLog("Capturing fresh full-resolution snapshot\u2026", "info");
     const portraitBlob = await exportFullPortrait();
+    const placedNames = [];
 
-    // -------------------------------------------------------------
-    // ACTION 1: Remove Pimples (LaMa Inpainting)
-    // -------------------------------------------------------------
+    /* ACTION 1: Remove Pimples (LaMa inpainting, full resolution) */
     if (doHeal) {
       const activeBlobs = currentBlobs.filter(b => b.active !== false);
       if (activeBlobs.length > 0) {
-        setLog(`Executing AI Inpainting on ${activeBlobs.length} blemish regions...`, "info");
+        applyBtnText.textContent = `Healing ${activeBlobs.length} spots\u2026`;
+        setLog(`AI inpainting ${activeBlobs.length} regions\u2026`, "info");
 
         const healForm = new FormData();
         healForm.append("image", portraitBlob, "portrait.png");
-        healForm.append("blobs_json", JSON.stringify(activeBlobs));
+        healForm.append("blobs_json", JSON.stringify(currentBlobs.filter(b => b.active !== false)));
         healForm.append("texture_blend", (parseInt(sliderTexture.value, 10) / 100).toString());
         healForm.append("feather_radius", sliderFeather.value);
         healForm.append("grain_intensity", (parseInt(sliderGrain.value, 10) / 100).toString());
 
-        const healRes = await fetch(`${getServerUrl()}/apply-heal`, {
-          method: "POST",
-          body: healForm
-        });
+        const healRes = await fetch(`${getServerUrl()}/apply-heal`, { method: "POST", body: healForm });
+        if (!healRes.ok) throw new Error(`Healing failed: ${await healRes.text()}`);
 
-        if (!healRes.ok) {
-          throw new Error(`Heal failed: ${await healRes.text()}`);
-        }
-
-        const healBlob = await healRes.blob();
-        const healBuffer = await healBlob.arrayBuffer();
-        const healFile = await tempFolder.createFile("healed_layer.png", { overwrite: true });
-        await healFile.write(healBuffer, { format: uxp.storage.formats.binary });
-        const healToken = localFileSystem.createSessionToken(healFile);
-
-        // Place on new layer in Photoshop
-        await core.executeAsModal(async () => {
-          await action.batchPlay([
-            {
-              _obj: "placeEvent",
-              target: { _path: healToken, _kind: "local" },
-              _options: { dialogOptions: "dontDisplay" }
-            }
-          ], {});
-
-          const placed = app.activeDocument.activeLayers[0];
-          placed.name = "AI Healed Blemishes";
-        }, { commandName: "Place AI Healed Layer" });
-
-        setLog("Placed non-destructive layer 'AI Healed Blemishes'.", "info");
+        const healBuffer = await (await healRes.blob()).arrayBuffer();
+        await placePatchAsLayer(healBuffer, "healed_layer.png", "AI Healed Blemishes");
+        placedNames.push("AI Healed Blemishes");
+      } else {
+        setLog("No active spots selected \u2014 skipping healing.", "info");
       }
     }
 
-    // -------------------------------------------------------------
-    // ACTION 2: Lighten Skin (Relative Tone Adjustment)
-    // -------------------------------------------------------------
+    /* ACTION 2: Smooth Skin (frequency separation + redness even, over healed look) */
+    if (doSmooth) {
+      applyBtnText.textContent = "Smoothing skin\u2026";
+      setLog("Frequency-separation smoothing\u2026", "info");
+
+      const smoothForm = new FormData();
+      smoothForm.append("image", portraitBlob, "portrait.png");
+      smoothForm.append("strength", (parseInt(sliderSmoothStrength.value, 10) / 100).toString());
+      smoothForm.append("texture_keep", (parseInt(sliderTextureKeep.value, 10) / 100).toString());
+      smoothForm.append("feather_radius", sliderFeather.value);
+      if (currentSkinMaskBlob) smoothForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
+
+      const smoothRes = await fetch(`${getServerUrl()}/apply-smooth`, { method: "POST", body: smoothForm });
+      if (!smoothRes.ok) throw new Error(`Smoothing failed: ${await smoothRes.text()}`);
+
+      const smoothBuffer = await (await smoothRes.blob()).arrayBuffer();
+      await placePatchAsLayer(smoothBuffer, "smoothed_layer.png", "AI Smoothed Skin");
+      placedNames.push("AI Smoothed Skin");
+    }
+
+    /* ACTION 3: Lighten Skin (applied over the healed + smoothed look) */
     if (doLighten) {
-      setLog("Calculating relative skin lightening curves...", "info");
+      applyBtnText.textContent = "Placing lightening layer\u2026";
+      setLog("Computing tone-relative lightening\u2026", "info");
 
       const lightenForm = new FormData();
       lightenForm.append("image", portraitBlob, "portrait.png");
       lightenForm.append("strength", (parseInt(sliderStrength.value, 10) / 100).toString());
       lightenForm.append("base_tone_lab", JSON.stringify(sampledBaseTone.lab));
       lightenForm.append("feather_radius", sliderFeather.value);
+      if (currentSkinMaskBlob) lightenForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
 
-      const lightenRes = await fetch(`${getServerUrl()}/apply-lighten`, {
-        method: "POST",
-        body: lightenForm
-      });
+      const lightenRes = await fetch(`${getServerUrl()}/apply-lighten`, { method: "POST", body: lightenForm });
+      if (!lightenRes.ok) throw new Error(`Lightening failed: ${await lightenRes.text()}`);
 
-      if (!lightenRes.ok) {
-        throw new Error(`Lighten failed: ${await lightenRes.text()}`);
-      }
+      const lightenBuffer = await (await lightenRes.blob()).arrayBuffer();
+      await placePatchAsLayer(lightenBuffer, "lightened_layer.png", "AI Lightened Skin");
+      placedNames.push("AI Lightened Skin");
+    }
 
-      const lightenBlob = await lightenRes.blob();
-      const lightenBuffer = await lightenBlob.arrayBuffer();
-      const lightenFile = await tempFolder.createFile("lightened_layer.png", { overwrite: true });
-      await lightenFile.write(lightenBuffer, { format: uxp.storage.formats.binary });
-      const lightenToken = localFileSystem.createSessionToken(lightenFile);
-
-      // Place on new layer in Photoshop
-      await core.executeAsModal(async () => {
-        await action.batchPlay([
-          {
-            _obj: "placeEvent",
-            target: { _path: lightenToken, _kind: "local" },
-            _options: { dialogOptions: "dontDisplay" }
-          }
-        ], {});
-
-        const placed = app.activeDocument.activeLayers[0];
-        placed.name = "AI Lightened Skin";
-      }, { commandName: "Place AI Lightened Layer" });
-
-      setLog("Placed non-destructive layer 'AI Lightened Skin'.", "info");
+    /* Group results under one tidy group */
+    if (placedNames.length > 1) {
+      applyBtnText.textContent = "Grouping layers\u2026";
+      await groupRetouchLayers("AI Retouch", placedNames);
     }
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
-    setLog(`✨ Retouch complete in ${elapsed}s! Non-destructive layers ready.`, "success");
+    setLog(`Done in ${elapsed}s! Non-destructive "${placedNames.join('" + "')}" layers added. Original untouched.`, "success");
 
   } catch (err) {
     console.error("Apply error:", err);
@@ -658,5 +978,8 @@ btnApplyAll.addEventListener("click", async () => {
     isProcessing = false;
     btnApplyAll.disabled = false;
     applySpinner.classList.remove("active");
+    applyBtnText.textContent = "2. Apply to Photoshop";
   }
 });
+
+setPreviewStatus("idle");

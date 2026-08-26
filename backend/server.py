@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import logging
+import math
 import os
 import time
 from contextlib import asynccontextmanager
@@ -20,6 +21,7 @@ from gemini_detector import detect_blemishes_gemini
 from face_segmenter import segment_face_skin, get_bisenet_parser
 from pimple_detector_v2 import detect_pimple_candidates, blobs_to_mask, add_blob_at_point, toggle_blob_at_point
 from skin_toner import calculate_tone_lift, create_lightened_rgba_patch
+from skin_smoother import apply_full_smooth, create_smooth_rgba_patch
 
 # Configure logging
 logging.basicConfig(
@@ -258,6 +260,169 @@ async def analyze_portrait(
         "blobs_count": len(blobs),
         "process_time_ms": process_time
     })
+
+
+@app.post("/preview")
+async def preview_result(
+    image: UploadFile = File(..., description="Full portrait image"),
+    blobs_json: Optional[str] = Form("[]", description="JSON list of all blemish blobs (active flags respected)"),
+    skin_mask: Optional[UploadFile] = File(None, description="Cached skin mask PNG from /analyze (skips re-segmentation)"),
+    include_heal: bool = Form(True, description="Include pimple removal in preview"),
+    include_smooth: bool = Form(True, description="Include skin smoothing (texture + redness) in preview"),
+    include_lighten: bool = Form(True, description="Include skin lightening in preview"),
+    smooth_strength: float = Form(0.45, description="Smoothing strength 0-1"),
+    texture_keep: float = Form(0.4, description="Pore/texture retention during smoothing 0-1"),
+    strength: float = Form(0.35, description="Lightening strength 0-1"),
+    texture_blend: float = Form(0.25, description="Texture retention 0-1"),
+    feather_radius: int = Form(3, description="Edge feather radius px"),
+    grain_intensity: float = Form(0.03, description="Micro-grain intensity"),
+    base_tone_lab: Optional[str] = Form(None, description="JSON [L,a,b] sampled base tone"),
+    max_size: int = Form(720, ge=256, le=1600, description="Max long edge for fast live preview")
+):
+    """
+    Layer 3 - Live Result Preview.
+    Renders the FINAL retouched look (healed pimples + lightened skin) on a downscaled
+    copy so the panel can show the user exactly how the result will look BEFORE applying.
+    Fast enough to run on every refinement edit.
+    """
+    global lama_model
+    t_start = time.time()
+    try:
+        image_bytes = await image.read()
+        pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image: {e}")
+
+    orig_w, orig_h = pil_image.size
+
+    # Downscale for fast inference (preview only; Apply uses full resolution)
+    scale = min(1.0, float(max_size) / float(max(orig_w, orig_h)))
+    if scale < 1.0:
+        prev_pil = pil_image.resize(
+            (max(1, int(orig_w * scale)), max(1, int(orig_h * scale))),
+            Image.Resampling.LANCZOS
+        )
+    else:
+        prev_pil = pil_image.copy()
+
+    img_rgb = np.array(prev_pil)
+    h, w, _ = img_rgb.shape
+
+    parsed_lab = None
+    if base_tone_lab:
+        try:
+            parsed_lab = json.loads(base_tone_lab)
+        except Exception:
+            parsed_lab = None
+
+    # Cached skin mask (preferred) or fresh segmentation fallback
+    mask_np = None
+    if include_lighten or include_smooth:
+        if skin_mask is not None:
+            try:
+                mask_bytes = await skin_mask.read()
+                mask_pil = Image.open(io.BytesIO(mask_bytes))
+                mask_np = np.array(mask_pil.split()[3]) if mask_pil.mode == "RGBA" else np.array(mask_pil.convert("L"))
+                if mask_np.shape[:2] != (h, w):
+                    mask_np = cv2.resize(mask_np, (w, h), interpolation=cv2.INTER_LINEAR)
+            except Exception as e:
+                logger.warning(f"Failed to read cached skin mask, re-segmenting: {e}")
+                mask_np = None
+        if mask_np is None:
+            mask_np, _ = segment_face_skin(img_rgb, feather_radius=feather_radius)
+
+    current_rgb = img_rgb.copy()
+    healed_pixels = 0
+
+    # --- Action 1: heal active blemish blobs ---
+    if include_heal and blobs_json:
+        try:
+            all_blobs = json.loads(blobs_json)
+        except Exception:
+            all_blobs = []
+        active_blobs = [b for b in all_blobs if b.get("active", True)]
+
+        if active_blobs:
+            if lama_model is None:
+                raise HTTPException(status_code=503, detail="AI inpainting model is not loaded.")
+            # Blobs arrive in original-image coordinates -> rescale to preview space
+            coord_scale = w / float(max(1, orig_w))
+            scaled_blobs = []
+            for b in active_blobs:
+                bc = dict(b)
+                bc["centroid"] = [b["centroid"][0] * coord_scale, b["centroid"][1] * coord_scale]
+                bc["radius"] = max(2.0, b.get("radius", 6) * coord_scale)
+                scaled_blobs.append(bc)
+
+            pimple_mask = blobs_to_mask(scaled_blobs, (h, w))
+            healed_pixels = int(np.sum(pimple_mask > 0))
+
+            if healed_pixels > 0:
+                clean_rgb = neutralize_erythema(current_rgb, pimple_mask)
+                try:
+                    inpainted_pil = lama_model(Image.fromarray(clean_rgb), Image.fromarray(pimple_mask))
+                    if inpainted_pil.size != (w, h):
+                        inpainted_pil = inpainted_pil.resize((w, h), Image.Resampling.BILINEAR)
+                    inpainted_np = np.array(inpainted_pil)
+                except Exception as e:
+                    logger.error(f"Preview inpainting error: {e}", exc_info=True)
+                    raise HTTPException(status_code=500, detail=f"Preview inpainting error: {e}")
+
+                final_rgb = blend_skin_texture(
+                    original_img=current_rgb,
+                    inpainted_img=inpainted_np,
+                    mask_gray=pimple_mask,
+                    texture_blend=max(0.0, min(1.0, texture_blend)),
+                    grain_intensity=max(0.0, min(0.2, grain_intensity))
+                )
+
+                feathered_alpha = apply_feather(pimple_mask, feather_radius=max(0, feather_radius))
+                alpha_f = (feathered_alpha.astype(np.float32) / 255.0)[:, :, None]
+                current_rgb = np.clip(
+                    final_rgb.astype(np.float32) * alpha_f + current_rgb.astype(np.float32) * (1.0 - alpha_f),
+                    0, 255
+                ).astype(np.uint8)
+
+    # --- Action 2: smooth skin (redness evening + frequency separation) ---
+    if include_smooth and mask_np is not None:
+        smoothed_rgb, _ = apply_full_smooth(
+            img_rgb=current_rgb,
+            skin_mask=mask_np,
+            strength=max(0.0, min(1.0, smooth_strength)),
+            texture_keep=max(0.05, min(1.0, texture_keep)),
+            feather_radius=max(0, feather_radius)
+        )
+        current_rgb = smoothed_rgb
+
+    # --- Action 3: lighten skin on the smoothed result ---
+    if include_lighten and mask_np is not None:
+        lightened_rgb, light_alpha = calculate_tone_lift(
+            img_rgb=current_rgb,
+            skin_mask=mask_np,
+            strength=max(0.0, min(1.0, strength)),
+            base_tone_lab=parsed_lab,
+            feather_radius=max(0, feather_radius)
+        )
+        la_f = (light_alpha.astype(np.float32) / 255.0)[:, :, None]
+        current_rgb = np.clip(
+            lightened_rgb.astype(np.float32) * la_f + current_rgb.astype(np.float32) * (1.0 - la_f),
+            0, 255
+        ).astype(np.uint8)
+
+    out_buf = io.BytesIO()
+    Image.fromarray(current_rgb).save(out_buf, format="JPEG", quality=88, optimize=True)
+    total_time = time.time() - t_start
+    logger.info(f"Preview rendered in {total_time:.3f}s ({w}x{h}, heal={include_heal}, lighten={include_lighten})")
+
+    return Response(
+        content=out_buf.getvalue(),
+        media_type="image/jpeg",
+        headers={
+            "X-Process-Time": f"{total_time:.3f}",
+            "X-Preview-Size": f"{w}x{h}",
+            "X-Healed-Pixels": str(healed_pixels)
+        }
+    )
 
 
 @app.post("/refine-point")
@@ -558,6 +723,60 @@ async def apply_heal(
     )
 
 
+@app.post("/apply-smooth")
+async def apply_smooth(
+    image: UploadFile = File(..., description="Portrait image"),
+    skin_mask: Optional[UploadFile] = File(None, description="Optional skin mask PNG"),
+    strength: float = Form(0.45, description="Smoothing strength 0-1"),
+    texture_keep: float = Form(0.4, description="Pore/texture retention 0-1"),
+    feather_radius: int = Form(4, description="Edge feather radius")
+):
+    """
+    Layer 5 Action: Smooth Skin.
+    Frequency-separation smoothing + full-face redness evening within skin_mask.
+    Returns a transparent RGBA patch for non-destructive placement in Photoshop.
+    """
+    t_start = time.time()
+    try:
+        image_bytes = await image.read()
+        pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image: {e}")
+
+    img_rgb = np.array(pil_image)
+    h, w, _ = img_rgb.shape
+
+    if skin_mask is not None:
+        mask_bytes = await skin_mask.read()
+        mask_pil = Image.open(io.BytesIO(mask_bytes))
+        mask_np = np.array(mask_pil.split()[3]) if mask_pil.mode == "RGBA" else np.array(mask_pil.convert("L"))
+        if mask_np.shape[:2] != (h, w):
+            mask_np = cv2.resize(mask_np, (w, h), interpolation=cv2.INTER_LINEAR)
+    else:
+        mask_np, _ = segment_face_skin(img_rgb, feather_radius=feather_radius)
+
+    rgba_patch = create_smooth_rgba_patch(
+        img_rgb=img_rgb,
+        skin_mask=mask_np,
+        strength=max(0.0, min(1.0, strength)),
+        texture_keep=max(0.05, min(1.0, texture_keep)),
+        feather_radius=max(0, feather_radius)
+    )
+
+    out_buf = io.BytesIO()
+    rgba_patch.save(out_buf, format="PNG", optimize=True)
+    total_time = time.time() - t_start
+    logger.info(f"Apply-smooth completed in {total_time:.3f}s (strength={strength}, keep={texture_keep})")
+    return Response(
+        content=out_buf.getvalue(),
+        media_type="image/png",
+        headers={
+            "X-Process-Time": f"{total_time:.3f}",
+            "X-Strength": str(strength)
+        }
+    )
+
+
 @app.post("/apply-lighten")
 async def apply_lighten(
     image: UploadFile = File(..., description="Portrait image"),
@@ -699,7 +918,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="AI Retouching Backend Server")
     parser.add_argument("--host", default="127.0.0.1", help="Host IP")
-    parser.add_argument("--port", type=int, default=8001, help="Port number")
+    parser.add_argument("--port", type=int, default=8765, help="Port number")
     args = parser.parse_args()
 
     def is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
@@ -708,7 +927,7 @@ if __name__ == "__main__":
 
     selected_port = args.port
     if is_port_in_use(selected_port, args.host):
-        for alt_port in [8008, 8000, 8080, 8888, 5000]:
+        for alt_port in [8766, 8001, 9001, 5005]:
             if not is_port_in_use(alt_port, args.host):
                 selected_port = alt_port
                 break
