@@ -105,9 +105,12 @@ def run_prototype_benchmark(image_path: str, output_dir: str = "benchmark_result
 
 
 if __name__ == "__main__":
-    test_images = ["test_healed_full_portrait.png"]
-    for img_p in test_images:
+    candidates = ["test_healed_full_portrait.png", "../test_healed_full_portrait.png"]
+    found = False
+    for img_p in candidates:
         if os.path.exists(img_p):
             run_prototype_benchmark(img_p)
-        else:
-            print(f"Sample image {img_p} not found.")
+            found = True
+            break
+    if not found:
+        print("Sample image not found.")
