@@ -177,7 +177,48 @@
     }
 
     // -------------------------------------------------------------
-    // 3. PREVIEW DETECTED MASKS
+    // 3. DODGE & BURN: AI Micro-Contrast Skin Evening
+    // -------------------------------------------------------------
+    function executeDodgeBurn(strength, featherRadius, opacityVal) {
+        if (app.documents.length === 0) {
+            alert("Please open a portrait photo first!", "AI Retouch");
+            return false;
+        }
+
+        var doc = app.activeDocument;
+        var fullExportFile = new File(tempFolder.fsName + "/full_portrait.png");
+        var dbFile = new File(tempFolder.fsName + "/dodge_burn.png");
+
+        if (fullExportFile.exists) fullExportFile.remove();
+        if (dbFile.exists) dbFile.remove();
+
+        exportCleanPortrait(fullExportFile);
+
+        var cmd = 'curl.exe -s -X POST ' +
+            '-F "image=@' + fullExportFile.fsName + '" ' +
+            '-F "strength=' + strength + '" ' +
+            '-F "feather_radius=' + featherRadius + '" ' +
+            '-o "' + dbFile.fsName + '" ' +
+            '"' + activeServerUrl + '/apply-dodge-burn"';
+
+        app.system(cmd);
+
+        if (!dbFile.exists || dbFile.length < 100) {
+            alert("Dodge & Burn failed. Is the server running on " + activeServerUrl + "?", "AI Server Error");
+            return false;
+        }
+
+        placeFile(dbFile);
+
+        var placedLayer = doc.activeLayer;
+        placedLayer.name = "AI Dodge & Burn";
+        placedLayer.opacity = opacityVal;
+
+        return true;
+    }
+
+    // -------------------------------------------------------------
+    // 4. PREVIEW DETECTED MASKS
     // -------------------------------------------------------------
     function previewDetectedMask(sensitivity, apiKey) {
         if (app.documents.length === 0) {
@@ -216,7 +257,7 @@
     // -------------------------------------------------------------
     // UI Dialog Window
     // -------------------------------------------------------------
-    var dlg = new Window("dialog", "AI Retouch v2 (Auto-Detection + Dual Actions)", undefined);
+    var dlg = new Window("dialog", "AI Retouch Studio (Pro Retouch Suite)", undefined);
     dlg.orientation = "column";
     dlg.alignChildren = ["fill", "top"];
     dlg.spacing = 8;
@@ -262,25 +303,29 @@
     };
 
     // --- SECTION: ACTIONS ---
-    var pnlAuto = dlg.add("panel", undefined, "⭐ Automated AI Retouch Actions");
+    var pnlAuto = dlg.add("panel", undefined, "Automated Retouch Actions");
     pnlAuto.orientation = "column";
     pnlAuto.alignChildren = ["fill", "top"];
     pnlAuto.spacing = 6;
 
-    var btnDualRetouch = pnlAuto.add("button", undefined, "✨ 1. Full Auto-Retouch (Heal Pimples + Lighten Skin)");
+    var btnDualRetouch = pnlAuto.add("button", undefined, "1. Full Studio Retouch (Heal + D&B + Tone)");
     btnDualRetouch.preferredSize.height = 36;
 
     var grpSplitBtns = pnlAuto.add("group");
     grpSplitBtns.orientation = "row";
-    var btnHealOnly = grpSplitBtns.add("button", undefined, "🔴 Remove Pimples");
-    btnHealOnly.preferredSize.width = 140;
+    var btnHealOnly = grpSplitBtns.add("button", undefined, "Remove Pimples");
+    btnHealOnly.preferredSize.width = 95;
     btnHealOnly.preferredSize.height = 28;
 
-    var btnLightenOnly = grpSplitBtns.add("button", undefined, "✨ Lighten Skin");
-    btnLightenOnly.preferredSize.width = 140;
+    var btnDbOnly = grpSplitBtns.add("button", undefined, "Dodge & Burn");
+    btnDbOnly.preferredSize.width = 95;
+    btnDbOnly.preferredSize.height = 28;
+
+    var btnLightenOnly = grpSplitBtns.add("button", undefined, "Tone Lift");
+    btnLightenOnly.preferredSize.width = 95;
     btnLightenOnly.preferredSize.height = 28;
 
-    var btnPreviewMask = pnlAuto.add("button", undefined, "👁️ Preview Detected Masks Overlay");
+    var btnPreviewMask = pnlAuto.add("button", undefined, "Preview Mask Overlay");
     btnPreviewMask.preferredSize.height = 24;
 
     // --- SECTION: PARAMETERS ---
@@ -301,7 +346,7 @@
     // Skin Lightening Strength
     var grpStr = pnlSettings.add("group");
     grpStr.orientation = "row";
-    grpStr.add("statictext", undefined, "Skin Lightening Strength:");
+    grpStr.add("statictext", undefined, "Skin Tone Strength:");
     var lblStr = grpStr.add("statictext", undefined, "35%");
     lblStr.preferredSize.width = 35;
     var sldStr = pnlSettings.add("slider", undefined, 35, 5, 100);
@@ -335,7 +380,7 @@
         if (hOk || lOk) {
             dlg.close();
         } else {
-            btnDualRetouch.text = "✨ 1. Full Auto-Retouch (Heal Pimples + Lighten Skin)";
+            btnDualRetouch.text = "1. Full Auto-Retouch (Heal + Tone Balance)";
             btnDualRetouch.enabled = true;
             dlg.update();
         }
@@ -353,8 +398,24 @@
         if (executeAutoHeal(sens, tex, 3, 100, apiKey)) {
             dlg.close();
         } else {
-            btnHealOnly.text = "🔴 Remove Pimples";
+            btnHealOnly.text = "Remove Pimples";
             btnHealOnly.enabled = true;
+            dlg.update();
+        }
+    };
+
+    btnDbOnly.onClick = function () {
+        var str = (Math.round(sldStr.value) / 100.0).toFixed(2);
+
+        btnDbOnly.text = "Processing D&B...";
+        btnDbOnly.enabled = false;
+        dlg.update();
+
+        if (executeDodgeBurn(str, 4, 100)) {
+            dlg.close();
+        } else {
+            btnDbOnly.text = "Dodge & Burn";
+            btnDbOnly.enabled = true;
             dlg.update();
         }
     };
@@ -362,14 +423,14 @@
     btnLightenOnly.onClick = function () {
         var str = (Math.round(sldStr.value) / 100.0).toFixed(2);
 
-        btnLightenOnly.text = "Lightening...";
+        btnLightenOnly.text = "Processing...";
         btnLightenOnly.enabled = false;
         dlg.update();
 
         if (executeLightenSkin(str, 4, 100)) {
             dlg.close();
         } else {
-            btnLightenOnly.text = "✨ Lighten Skin";
+            btnLightenOnly.text = "Tone Lift";
             btnLightenOnly.enabled = true;
             dlg.update();
         }
