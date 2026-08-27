@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AI Retouch v2 - Auto-Detection</title>
+  <title>AI Retouch Studio</title>
   <link rel="stylesheet" href="index.css">
 </head>
 <body>
@@ -12,13 +12,17 @@
     <header class="panel-header">
       <div class="brand">
         <div class="brand-icon">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83" />
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M3 7V5a2 2 0 0 1 2-2h2"/>
+            <path d="M17 3h2a2 2 0 0 1 2 2v2"/>
+            <path d="M21 17v2a2 2 0 0 1-2 2h-2"/>
+            <path d="M7 21H5a2 2 0 0 1-2-2v-2"/>
           </svg>
         </div>
         <div class="brand-text">
-          <h1>AI Retouch <span class="badge-v2">v2</span></h1>
-          <span class="version-tag">Auto-Detect &middot; Live Preview</span>
+          <h1>AI Retouch <span class="badge-v2">v2.0</span></h1>
+          <span class="version-tag">Studio Edition</span>
         </div>
       </div>
       <div id="server-status" class="status-badge checking" title="Checking backend server...">
@@ -30,14 +34,16 @@
     <!-- Main Content Scrollable Area -->
     <main class="panel-content">
 
-      <!-- Step 1: Auto-Detect -->
+      <!-- Step 1: Auto-Detect Action Card -->
       <section class="detect-action-card">
-        <button id="btn-auto-detect" class="primary-btn pulse-glow">
-          <span class="btn-icon">&#9889;</span>
+        <button id="btn-auto-detect" class="primary-btn">
+          <svg class="btn-icon-svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+          </svg>
           <span class="btn-text" id="detect-btn-text">1. Analyze Portrait</span>
           <div class="spinner" id="detect-spinner"></div>
         </button>
-        <p class="card-hint">Finds skin &amp; blemishes automatically &mdash; then shows you the retouched result.</p>
+        <p class="card-hint">Automatically segments facial skin and detects blemishes.</p>
       </section>
 
       <!-- Layer 3: Live Result Preview Viewport -->
@@ -48,9 +54,9 @@
             <span id="preview-status" class="preview-pill pill-idle">Idle</span>
             <span id="blob-counter" class="pill-badge">0 Spots</span>
           </div>
-          <div class="preview-swatch-container" title="Base Skin Tone (used for natural lightening)">
-            <span class="swatch-label">Tone:</span>
-            <div id="tone-swatch" class="tone-swatch" style="background-color: #e5b497;"></div>
+          <div class="preview-swatch-container" title="Base Skin Tone (used for tone balancing)">
+            <span class="swatch-label">Base Tone</span>
+            <div id="tone-swatch" class="tone-swatch" style="background-color: #d8a483;"></div>
           </div>
         </div>
 
@@ -58,74 +64,85 @@
         <div class="canvas-wrapper" id="canvas-wrapper">
           <canvas id="preview-canvas"></canvas>
           <div id="canvas-empty-overlay" class="canvas-empty-state">
-            <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5">
+            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
               <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
               <circle cx="8.5" cy="8.5" r="1.5"/>
               <polyline points="21 15 16 10 5 21"/>
             </svg>
-            <span>Open a portrait in Photoshop and click<br>&ldquo;Analyze Portrait&rdquo;</span>
+            <span>Open a portrait and click &ldquo;Analyze Portrait&rdquo;</span>
           </div>
         </div>
 
         <!-- Viewport Toolbar -->
         <div class="preview-toolbar">
           <div class="tool-buttons">
-            <button id="tool-pimple" class="tool-btn active" title="Click a spot: toggle it off/on. Click clean area: add a missed spot">
-              <span class="tool-icon">&#128308;</span>
-              <span>Blemish</span>
+            <button id="tool-pimple" class="tool-btn active" title="Click a spot to toggle off/on. Click clean skin to add a spot">
+              <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="8"/>
+                <circle cx="12" cy="12" r="2"/>
+              </svg>
+              <span>Spot Edit</span>
             </button>
-            <button id="tool-eyedropper" class="tool-btn" title="Click clean skin to sample the base tone for lightening">
-              <span class="tool-icon">&#129514;</span>
-              <span>Tone</span>
+            <button id="tool-eyedropper" class="tool-btn" title="Sample base skin tone from clean skin">
+              <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2l4 4L7 17H3v-4L14 2z"/>
+                <path d="M14 6l4 4"/>
+              </svg>
+              <span>Sample Tone</span>
             </button>
           </div>
 
           <div class="seg-group" id="view-mode-group">
-            <button id="btn-mode-before" class="seg-btn" title="Show original photo">Before</button>
-            <button id="btn-mode-split" class="seg-btn active" title="Draggable before/after split">Split</button>
-            <button id="btn-mode-after" class="seg-btn" title="Show final retouched result">After</button>
+            <button id="btn-mode-before" class="seg-btn" title="Original photo">Before</button>
+            <button id="btn-mode-split" class="seg-btn active" title="Interactive split divider">Split</button>
+            <button id="btn-mode-after" class="seg-btn" title="Retouched result">After</button>
           </div>
 
           <div class="mask-toggles">
-            <label class="mini-toggle" title="Toggle red blemish markers">
+            <label class="mini-toggle" title="Toggle blemish marker overlay">
               <input type="checkbox" id="chk-show-pimples" checked>
               <span class="mini-tag red">Spots</span>
             </label>
-            <label class="mini-toggle" title="Toggle cyan skin region">
+            <label class="mini-toggle" title="Toggle skin mask overlay">
               <input type="checkbox" id="chk-show-skin" checked>
               <span class="mini-tag blue">Skin</span>
             </label>
           </div>
         </div>
 
-        <p class="viewport-hint" id="viewport-hint">Every edit updates the preview automatically &mdash; drag the divider to compare.</p>
+        <p class="viewport-hint" id="viewport-hint">Drag the center slider to inspect before and after in real time.</p>
       </section>
 
       <!-- Layer 4: AI Text Refinement -->
       <details class="refine-drawer">
         <summary class="drawer-title">
-          <span>&#10024; AI Instruction (&ldquo;remove mole near chin&rdquo;)</span>
-          <svg class="chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+          <div class="drawer-title-label">
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+            </svg>
+            <span>AI Natural Language Prompt</span>
+          </div>
+          <svg class="chevron" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="6 9 12 15 18 9"></polyline>
           </svg>
         </summary>
         <div class="drawer-content">
           <div class="prompt-input-row">
-            <input type="text" id="input-prompt" placeholder="e.g. ignore freckles on nose">
-            <button id="btn-send-prompt" class="secondary-btn" title="Send instruction to AI">
+            <input type="text" id="input-prompt" placeholder="e.g. keep beauty mole on left cheek">
+            <button id="btn-send-prompt" class="secondary-btn" title="Send prompt instruction">
               <span>Send</span>
             </button>
           </div>
         </div>
       </details>
 
-      <!-- Feature Controls -->
+      <!-- Feature Controls: Blemish Removal -->
       <section class="feature-card">
         <div class="feature-header">
           <label class="checkbox-label">
             <input type="checkbox" id="chk-enable-heal" checked>
             <span class="checkbox-custom"></span>
-            <span class="feature-name">Remove Pimples</span>
+            <span class="feature-name">Remove Blemishes &amp; Acne</span>
           </label>
           <span class="feature-tech">LaMa Inpaint</span>
         </div>
@@ -139,10 +156,17 @@
             <input type="range" id="slider-sensitivity" min="10" max="100" value="50" step="5">
           </div>
 
+          <div class="toggle-group">
+            <label class="toggle-item">
+              <input type="checkbox" id="chk-preserve-moles" checked>
+              <span>Preserve Beauty Moles &amp; Marks</span>
+            </label>
+          </div>
+
           <details class="nested-drawer">
             <summary class="nested-title">
-              <span>Fine-Tuning (Texture, Feather, Grain)</span>
-              <svg class="chevron" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+              <span>Texture &amp; Feather Fine-Tuning</span>
+              <svg class="chevron" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="6 9 12 15 18 9"></polyline>
               </svg>
             </summary>
@@ -163,7 +187,7 @@
               </div>
               <div class="control-group">
                 <div class="control-label">
-                  <span>Micro-Grain Overlay</span>
+                  <span>Micro-Grain Matching</span>
                   <span id="val-grain" class="val-badge">3%</span>
                 </div>
                 <input type="range" id="slider-grain" min="0" max="15" value="3" step="1">
@@ -173,12 +197,35 @@
         </div>
       </section>
 
+      <!-- Feature Controls: AI Dodge & Burn -->
+      <section class="feature-card">
+        <div class="feature-header">
+          <label class="checkbox-label">
+            <input type="checkbox" id="chk-enable-db" checked>
+            <span class="checkbox-custom"></span>
+            <span class="feature-name">AI Dodge &amp; Burn</span>
+          </label>
+          <span class="feature-tech">Micro-Contrast</span>
+        </div>
+
+        <div class="feature-body" id="db-controls-body">
+          <div class="control-group">
+            <div class="control-label">
+              <span>Tonal Evening Intensity</span>
+              <span id="val-db-strength" class="val-badge">40%</span>
+            </div>
+            <input type="range" id="slider-db-strength" min="0" max="100" value="40" step="5">
+          </div>
+        </div>
+      </section>
+
+      <!-- Feature Controls: Smooth Skin -->
       <section class="feature-card">
         <div class="feature-header">
           <label class="checkbox-label">
             <input type="checkbox" id="chk-enable-smooth" checked>
             <span class="checkbox-custom"></span>
-            <span class="feature-name">Smooth Skin</span>
+            <span class="feature-name">Smooth Skin Texture</span>
           </label>
           <span class="feature-tech">Freq. Separation</span>
         </div>
@@ -186,28 +233,28 @@
         <div class="feature-body" id="smooth-controls-body">
           <div class="control-group">
             <div class="control-label">
-              <span>Smoothing Strength</span>
+              <span>Smoothing Intensity</span>
               <span id="val-smooth-strength" class="val-badge">45%</span>
             </div>
             <input type="range" id="slider-smooth-strength" min="0" max="100" value="45" step="5">
           </div>
           <div class="control-group">
             <div class="control-label">
-              <span>Keep Pores / Texture</span>
+              <span>Pore &amp; Micro-Texture Retention</span>
               <span id="val-texture-keep" class="val-badge">40%</span>
             </div>
             <input type="range" id="slider-texture-keep" min="5" max="100" value="40" step="5">
           </div>
-          <p class="control-hint">Evens redness &amp; melts spots, scars and rough texture while keeping pores.</p>
         </div>
       </section>
 
+      <!-- Feature Controls: Tone Balancing -->
       <section class="feature-card">
         <div class="feature-header">
           <label class="checkbox-label">
             <input type="checkbox" id="chk-enable-lighten" checked>
             <span class="checkbox-custom"></span>
-            <span class="feature-name">Lighten Skin</span>
+            <span class="feature-name">Tone Balancing &amp; Lift</span>
           </label>
           <span class="feature-tech">Tone-Relative</span>
         </div>
@@ -215,7 +262,7 @@
         <div class="feature-body" id="lighten-controls-body">
           <div class="control-group">
             <div class="control-label">
-              <span>Brightening Strength</span>
+              <span>Brightening Intensity</span>
               <span id="val-strength" class="val-badge">35%</span>
             </div>
             <input type="range" id="slider-strength" min="5" max="100" value="35" step="5">
@@ -230,18 +277,76 @@
         </div>
       </section>
 
-      <!-- Step 2: Apply -->
+      <!-- Feature Controls: Eyes & Teeth -->
+      <section class="feature-card">
+        <div class="feature-header">
+          <label class="checkbox-label">
+            <input type="checkbox" id="chk-enable-eyes-teeth">
+            <span class="checkbox-custom"></span>
+            <span class="feature-name">Eyes &amp; Teeth Enhancer</span>
+          </label>
+          <span class="feature-tech">Feature AI</span>
+        </div>
+
+        <div class="feature-body" id="eyes-teeth-controls-body">
+          <div class="control-group">
+            <div class="control-label">
+              <span>Teeth Whitening</span>
+              <span id="val-teeth" class="val-badge">50%</span>
+            </div>
+            <input type="range" id="slider-teeth" min="0" max="100" value="50" step="5">
+          </div>
+          <div class="control-group">
+            <div class="control-label">
+              <span>Eye Brightness &amp; Sclera</span>
+              <span id="val-eyes" class="val-badge">45%</span>
+            </div>
+            <input type="range" id="slider-eyes" min="0" max="100" value="45" step="5">
+          </div>
+        </div>
+      </section>
+
+      <!-- Feature Controls: Shine Neutralizer -->
+      <section class="feature-card">
+        <div class="feature-header">
+          <label class="checkbox-label">
+            <input type="checkbox" id="chk-enable-shine">
+            <span class="checkbox-custom"></span>
+            <span class="feature-name">Shine &amp; Glare Neutralizer</span>
+          </label>
+          <span class="feature-tech">Matte Diffuse</span>
+        </div>
+
+        <div class="feature-body" id="shine-controls-body">
+          <div class="control-group">
+            <div class="control-label">
+              <span>Anti-Glare Strength</span>
+              <span id="val-shine" class="val-badge">40%</span>
+            </div>
+            <input type="range" id="slider-shine" min="0" max="100" value="40" step="5">
+          </div>
+        </div>
+      </section>
+
+      <!-- Step 2: Apply to Photoshop -->
       <section class="apply-section">
         <button id="btn-apply-all" class="primary-btn execute-btn">
-          <span class="btn-icon">&#10024;</span>
+          <svg class="btn-icon-svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
           <span class="btn-text" id="apply-btn-text">2. Apply to Photoshop</span>
           <div class="spinner" id="apply-spinner"></div>
         </button>
-        <p class="apply-hint">Non-destructive layers, grouped under &ldquo;AI Retouch&rdquo;. Original untouched.</p>
+        <p class="apply-hint">Creates non-destructive layers under &ldquo;AI Retouch&rdquo; group.</p>
       </section>
 
       <!-- Live Log / Status Banner -->
       <div id="log-box" class="log-box info">
+        <svg class="log-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="12" y1="16" x2="12" y2="12"/>
+          <line x1="12" y1="8" x2="12.01" y2="8"/>
+        </svg>
         <span id="log-message">Ready. Open a portrait and click &ldquo;Analyze Portrait&rdquo;.</span>
       </div>
     </main>
@@ -249,12 +354,12 @@
     <!-- Footer -->
     <footer class="panel-footer">
       <div class="server-config">
-        <label for="input-server-url">AI Server:</label>
-        <input type="text" id="input-server-url" value="http://127.0.0.1:8765">
+        <span class="server-config-label">AI Host:</span>
+        <input type="text" id="input-server-url" value="http://127.0.0.1:8765" spellcheck="false">
         <button id="btn-refresh-status" title="Refresh Connection" class="icon-btn">
-          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M23 4v6h-6M1 20v-6h6" />
-            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+          <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M23 4v6h-6M1 20v-6h6"/>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
           </svg>
         </button>
       </div>
