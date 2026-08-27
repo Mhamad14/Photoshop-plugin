@@ -131,25 +131,33 @@ async def set_api_key(gemini_api_key: str = Form(...)):
 def neutralize_erythema(img_rgb: np.ndarray, mask_gray: np.ndarray) -> np.ndarray:
     """
     Dermatological Pre-processing:
-    Neutralizes inflamed red/brown erythema cast under and around acne blemishes.
+    Neutralizes inflamed red/brown erythema cast and dark/whitehead core under acne blemishes
+    using smooth guided background propagation from surrounding healthy skin.
     """
     img_lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
     l_c, a_c, b_c = cv2.split(img_lab)
 
-    skin_weight = (mask_gray == 0).astype(np.float32)
+    # Surrounding healthy skin weight
+    healthy_weight = (mask_gray == 0).astype(np.float32)
+    ksize = max(21, int(max(img_rgb.shape[:2]) * 0.03)) | 1
 
-    blurred_a = cv2.GaussianBlur(a_c * skin_weight, (0, 0), 21)
-    blurred_b = cv2.GaussianBlur(b_c * skin_weight, (0, 0), 21)
-    norm_weight = cv2.GaussianBlur(skin_weight, (0, 0), 21) + 1e-5
+    blurred_l = cv2.GaussianBlur(l_c * healthy_weight, (ksize, ksize), 0)
+    blurred_a = cv2.GaussianBlur(a_c * healthy_weight, (ksize, ksize), 0)
+    blurred_b = cv2.GaussianBlur(b_c * healthy_weight, (ksize, ksize), 0)
+    norm_weight = cv2.GaussianBlur(healthy_weight, (ksize, ksize), 0) + 1e-5
 
+    healthy_l = blurred_l / norm_weight
     healthy_a = blurred_a / norm_weight
     healthy_b = blurred_b / norm_weight
 
     mask_factor = (mask_gray.astype(np.float32) / 255.0)
-    a_corrected = a_c * (1.0 - mask_factor * 0.75) + healthy_a * (mask_factor * 0.75)
-    b_corrected = b_c * (1.0 - mask_factor * 0.50) + healthy_b * (mask_factor * 0.50)
+    
+    # Correct redness (a*), pigment/pus (b*), and tone/luminance crater/apex (L*)
+    a_corrected = a_c * (1.0 - mask_factor * 0.85) + healthy_a * (mask_factor * 0.85)
+    b_corrected = b_c * (1.0 - mask_factor * 0.70) + healthy_b * (mask_factor * 0.70)
+    l_corrected = l_c * (1.0 - mask_factor * 0.60) + healthy_l * (mask_factor * 0.60)
 
-    lab_clean = cv2.merge([l_c, a_corrected, b_corrected]).clip(0, 255).astype(np.uint8)
+    lab_clean = cv2.merge([l_corrected, a_corrected, b_corrected]).clip(0, 255).astype(np.uint8)
     return cv2.cvtColor(lab_clean, cv2.COLOR_LAB2RGB)
 
 
@@ -161,25 +169,123 @@ def blend_skin_texture(
     grain_intensity: float = 0.03
 ) -> np.ndarray:
     """
-    Frequency Separation:
-    Extracts high-pass spatial skin pores from the original image and re-injects them
-    into the inpainted region to avoid artificial smoothing.
+    Pore-Preserving Texture Transfer & Illumination Alignment:
+    1. Samples high-frequency spatial skin pore texture from healthy surrounding skin annulus (NOT from the unhealed blemish).
+    2. Aligns local illumination gradient to prevent lighter/darker ghost circles.
+    3. Adds subtle micro-grain matched to authentic skin texture.
     """
+    h, w, c = inpainted_img.shape
     orig_f = original_img.astype(np.float32)
     inpaint_f = inpainted_img.astype(np.float32)
     mask_f = (mask_gray.astype(np.float32) / 255.0)[:, :, None]
 
     if texture_blend > 0:
+        # Extract high-frequency pores from the image outside the mask
         blurred_orig = cv2.GaussianBlur(orig_f, (5, 5), 0)
-        high_freq = orig_f - blurred_orig
-        inpaint_f = inpaint_f + (high_freq * texture_blend * mask_f)
+        high_freq_all = orig_f - blurred_orig
+
+        # Zero out the high frequencies inside the blemish mask so pimple roughness/scabs are excluded
+        healthy_mask = (mask_gray == 0).astype(np.float32)[:, :, None]
+        high_freq_healthy = high_freq_all * healthy_mask
+
+        # Propagate healthy pore texture across the blemish spots using normalized blur
+        k_tex = max(11, int(min(h, w) * 0.02)) | 1
+        prop_tex = cv2.GaussianBlur(high_freq_healthy, (k_tex, k_tex), 0)
+        norm_tex = cv2.GaussianBlur(healthy_mask.squeeze(-1), (k_tex, k_tex), 0)[:, :, None] + 1e-5
+        synthesized_pores = prop_tex / norm_tex
+
+        # Re-inject realistic healthy pores into the inpainted spot
+        inpaint_f = inpaint_f + (synthesized_pores * (texture_blend * 1.2) * mask_f)
 
     if grain_intensity > 0:
-        h, w, c = inpaint_f.shape
+        # Add micro-grain matched to skin tone
         noise = np.random.normal(loc=0.0, scale=grain_intensity * 255.0, size=(h, w, c))
         inpaint_f = inpaint_f + (noise * mask_f)
 
+    # Local Illumination Gradient Alignment (Prevents ghost circles on shadows/highlights)
+    # Match low-frequency illumination of inpainted patch to healthy surroundings
+    k_illum = max(31, int(min(h, w) * 0.05)) | 1
+    orig_illum = cv2.GaussianBlur(orig_f, (k_illum, k_illum), 0)
+    inpaint_illum = cv2.GaussianBlur(inpaint_f, (k_illum, k_illum), 0)
+    illum_delta = (orig_illum - inpaint_illum) * mask_f * 0.45
+    inpaint_f = inpaint_f + illum_delta
+
     return np.clip(inpaint_f, 0, 255).astype(np.uint8)
+
+
+def inpaint_with_context_tiling(
+    model,
+    img_rgb: np.ndarray,
+    mask_gray: np.ndarray,
+    max_tile_size: int = 768,
+    context_pad: int = 80
+) -> np.ndarray:
+    """
+    Context-Aware Tiled Inpainting:
+    Runs Simple-LaMa at high resolution for blemish clusters with context margins,
+    preserving 100% native portrait sharpness without whole-canvas downscaling blur.
+    """
+    h, w, _ = img_rgb.shape
+    if model is None:
+        return img_rgb.copy()
+
+    # If entire image is reasonably sized, run direct inpainting
+    if max(h, w) <= max_tile_size:
+        pil_in = model(Image.fromarray(img_rgb), Image.fromarray(mask_gray))
+        if pil_in.size != (w, h):
+            pil_in = pil_in.resize((w, h), Image.Resampling.BILINEAR)
+        return np.array(pil_in)
+
+    # Find connected components of blemish mask
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats((mask_gray > 10).astype(np.uint8))
+    if num_labels <= 1:
+        return img_rgb.copy()
+
+    output_rgb = img_rgb.copy()
+
+    # Cluster nearby blemishes together
+    dilated_clusters = cv2.dilate((mask_gray > 10).astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_RECT, (context_pad, context_pad)))
+    c_num, c_labels, c_stats, _ = cv2.connectedComponentsWithStats(dilated_clusters)
+
+    for c in range(1, c_num):
+        bx = int(c_stats[c, cv2.CC_STAT_LEFT])
+        by = int(c_stats[c, cv2.CC_STAT_TOP])
+        bw = int(c_stats[c, cv2.CC_STAT_WIDTH])
+        bh = int(c_stats[c, cv2.CC_STAT_HEIGHT])
+
+        # Add context padding
+        x1 = max(0, bx - context_pad)
+        y1 = max(0, by - context_pad)
+        x2 = min(w, bx + bw + context_pad)
+        y2 = min(h, by + bh + context_pad)
+
+        crop_w = x2 - x1
+        crop_h = y2 - y1
+
+        crop_img = img_rgb[y1:y2, x1:x2]
+        crop_mask = mask_gray[y1:y2, x1:x2]
+
+        if np.sum(crop_mask > 0) == 0:
+            continue
+
+        # Inpaint localized crop
+        try:
+            crop_pil = model(Image.fromarray(crop_img), Image.fromarray(crop_mask))
+            if crop_pil.size != (crop_w, crop_h):
+                crop_pil = crop_pil.resize((crop_w, crop_h), Image.Resampling.BILINEAR)
+            crop_inpainted = np.array(crop_pil)
+        except Exception as e:
+            logger.warning(f"Tile inpainting exception on crop [{x1}:{x2}, {y1}:{y2}]: {e}")
+            continue
+
+        # Feathered blend into output
+        crop_alpha = cv2.GaussianBlur((crop_mask > 0).astype(np.float32), (7, 7), 0)[:, :, None]
+        output_rgb[y1:y2, x1:x2] = np.clip(
+            crop_inpainted.astype(np.float32) * crop_alpha + output_rgb[y1:y2, x1:x2].astype(np.float32) * (1.0 - crop_alpha),
+            0, 255
+        ).astype(np.uint8)
+
+    return output_rgb
 
 
 def apply_feather(mask_gray: np.ndarray, feather_radius: int = 3) -> np.ndarray:
@@ -270,6 +376,7 @@ async def preview_result(
     include_heal: bool = Form(True, description="Include pimple removal in preview"),
     include_smooth: bool = Form(True, description="Include skin smoothing (texture + redness) in preview"),
     include_lighten: bool = Form(True, description="Include skin lightening in preview"),
+    heal_mode: str = Form("full_inpaint", description="'full_inpaint' | 'calm_redness' | 'flatten_bump'"),
     smooth_strength: float = Form(0.45, description="Smoothing strength 0-1"),
     texture_keep: float = Form(0.4, description="Pore/texture retention during smoothing 0-1"),
     strength: float = Form(0.35, description="Lightening strength 0-1"),
@@ -343,8 +450,6 @@ async def preview_result(
         active_blobs = [b for b in all_blobs if b.get("active", True)]
 
         if active_blobs:
-            if lama_model is None:
-                raise HTTPException(status_code=503, detail="AI inpainting model is not loaded.")
             # Blobs arrive in original-image coordinates -> rescale to preview space
             coord_scale = w / float(max(1, orig_w))
             scaled_blobs = []
@@ -354,27 +459,38 @@ async def preview_result(
                 bc["radius"] = max(2.0, b.get("radius", 6) * coord_scale)
                 scaled_blobs.append(bc)
 
-            pimple_mask = blobs_to_mask(scaled_blobs, (h, w))
+            pimple_mask = blobs_to_mask(scaled_blobs, (h, w), soft_falloff=False)
             healed_pixels = int(np.sum(pimple_mask > 0))
 
             if healed_pixels > 0:
                 clean_rgb = neutralize_erythema(current_rgb, pimple_mask)
-                try:
-                    inpainted_pil = lama_model(Image.fromarray(clean_rgb), Image.fromarray(pimple_mask))
-                    if inpainted_pil.size != (w, h):
-                        inpainted_pil = inpainted_pil.resize((w, h), Image.Resampling.BILINEAR)
-                    inpainted_np = np.array(inpainted_pil)
-                except Exception as e:
-                    logger.error(f"Preview inpainting error: {e}", exc_info=True)
-                    raise HTTPException(status_code=500, detail=f"Preview inpainting error: {e}")
 
-                final_rgb = blend_skin_texture(
-                    original_img=current_rgb,
-                    inpainted_img=inpainted_np,
-                    mask_gray=pimple_mask,
-                    texture_blend=max(0.0, min(1.0, texture_blend)),
-                    grain_intensity=max(0.0, min(0.2, grain_intensity))
-                )
+                if heal_mode == "calm_redness":
+                    final_rgb = clean_rgb
+                elif heal_mode == "flatten_bump":
+                    orig_f = current_rgb.astype(np.float32)
+                    blurred_low = cv2.GaussianBlur(orig_f, (15, 15), 0)
+                    high_freq = orig_f - blurred_low
+                    clean_f = clean_rgb.astype(np.float32)
+                    mask_f = (pimple_mask.astype(np.float32) / 255.0)[:, :, None]
+                    final_rgb = np.clip(clean_f + high_freq * (1.0 - mask_f * 0.7), 0, 255).astype(np.uint8)
+                else:
+                    if lama_model is None:
+                        raise HTTPException(status_code=503, detail="AI inpainting model is not loaded.")
+                    inpainted_np = inpaint_with_context_tiling(
+                        model=lama_model,
+                        img_rgb=clean_rgb,
+                        mask_gray=pimple_mask,
+                        max_tile_size=768,
+                        context_pad=40
+                    )
+                    final_rgb = blend_skin_texture(
+                        original_img=current_rgb,
+                        inpainted_img=inpainted_np,
+                        mask_gray=pimple_mask,
+                        texture_blend=max(0.0, min(1.0, texture_blend)),
+                        grain_intensity=max(0.0, min(0.2, grain_intensity))
+                    )
 
                 feathered_alpha = apply_feather(pimple_mask, feather_radius=max(0, feather_radius))
                 alpha_f = (feathered_alpha.astype(np.float32) / 255.0)[:, :, None]
@@ -625,19 +741,17 @@ async def apply_heal(
     image: UploadFile = File(..., description="Portrait image"),
     blobs_json: Optional[str] = Form(None, description="JSON list of blobs to heal"),
     mask: Optional[UploadFile] = File(None, description="Optional binary mask image upload"),
+    heal_mode: str = Form("full_inpaint", description="'full_inpaint' | 'calm_redness' | 'flatten_bump'"),
     texture_blend: float = Form(0.25, description="Skin texture blend ratio (0.0 to 1.0)"),
     feather_radius: int = Form(3, description="Feather blur radius in pixels"),
     grain_intensity: float = Form(0.03, description="Micro-grain intensity")
 ):
     """
-    Layer 5 Action 1: Remove Pimples via Simple-LaMa Inpainting.
+    Layer 5 Action 1: Remove/Hide Pimples via Context-Tiled Inpainting or Dermatological Calming.
     Accepts active blobs JSON or binary mask PNG.
     Generates transparent RGBA PNG patch ready for non-destructive placement on Photoshop layer.
     """
     global lama_model
-    if lama_model is None:
-        raise HTTPException(status_code=503, detail="AI inpainting model is not loaded.")
-
     t_start = time.time()
     try:
         image_bytes = await image.read()
@@ -652,7 +766,7 @@ async def apply_heal(
     if blobs_json:
         try:
             blobs = json.loads(blobs_json)
-            mask_np = blobs_to_mask(blobs, (h, w))
+            mask_np = blobs_to_mask(blobs, (h, w), soft_falloff=False)
         except Exception as e:
             logger.warning(f"Failed to parse blobs_json: {e}")
             mask_np = np.zeros((h, w), dtype=np.uint8)
@@ -676,27 +790,42 @@ async def apply_heal(
         transparent_empty.save(out_buf, format="PNG")
         return Response(content=out_buf.getvalue(), media_type="image/png", headers={"X-Healed-Pixels": "0"})
 
-    # 1. Neutralize erythema
+    # 1. Pre-process / Neutralize erythema & dark craters
     clean_rgb = neutralize_erythema(img_rgb, mask_np)
 
-    # 2. Inpaint with Simple-LaMa
-    try:
-        inpainted_pil = lama_model(Image.fromarray(clean_rgb), Image.fromarray(mask_np))
-        if inpainted_pil.size != pil_image.size:
-            inpainted_pil = inpainted_pil.resize(pil_image.size, Image.Resampling.BILINEAR)
-        inpainted_np = np.array(inpainted_pil)
-    except Exception as e:
-        logger.error(f"Inpainting inference error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Inpainting error: {e}")
+    if heal_mode == "calm_redness":
+        # Calming mode: neutralizes angry redness and inflammation to natural skin tone
+        final_rgb = clean_rgb
+    elif heal_mode == "flatten_bump":
+        # Frequency separation bump flattening
+        orig_f = img_rgb.astype(np.float32)
+        blurred_low = cv2.GaussianBlur(orig_f, (15, 15), 0)
+        high_freq = orig_f - blurred_low
+        # Neutralize low-frequency color & flatten high-frequency 3D bump
+        clean_f = clean_rgb.astype(np.float32)
+        mask_f = (mask_np.astype(np.float32) / 255.0)[:, :, None]
+        final_rgb = np.clip(clean_f + high_freq * (1.0 - mask_f * 0.7), 0, 255).astype(np.uint8)
+    else:
+        # Default Full AI Inpainting Mode
+        if lama_model is None:
+            raise HTTPException(status_code=503, detail="AI inpainting model is not loaded.")
 
-    # 3. Frequency separation texture blend & micrograin
-    final_rgb = blend_skin_texture(
-        original_img=img_rgb,
-        inpainted_img=inpainted_np,
-        mask_gray=mask_np,
-        texture_blend=max(0.0, min(1.0, texture_blend)),
-        grain_intensity=max(0.0, min(0.2, grain_intensity))
-    )
+        inpainted_np = inpaint_with_context_tiling(
+            model=lama_model,
+            img_rgb=clean_rgb,
+            mask_gray=mask_np,
+            max_tile_size=768,
+            context_pad=80
+        )
+
+        # 3. Healthy pore texture synthesis & illumination gradient alignment
+        final_rgb = blend_skin_texture(
+            original_img=img_rgb,
+            inpainted_img=inpainted_np,
+            mask_gray=mask_np,
+            texture_blend=max(0.0, min(1.0, texture_blend)),
+            grain_intensity=max(0.0, min(0.2, grain_intensity))
+        )
 
     # 4. Feather mask edges
     feathered_alpha = apply_feather(mask_np, feather_radius=max(0, feather_radius))
@@ -712,7 +841,7 @@ async def apply_heal(
     rgba_result.save(out_buf, format="PNG", optimize=True)
     total_time = time.time() - t_start
 
-    logger.info(f"Apply-heal completed in {total_time:.3f}s")
+    logger.info(f"Apply-heal completed in {total_time:.3f}s (mode={heal_mode})")
     return Response(
         content=out_buf.getvalue(),
         media_type="image/png",
@@ -851,16 +980,31 @@ async def apply_lighten(
 async def auto_heal(
     image: UploadFile = File(..., description="Portrait image for automated blemish removal"),
     sensitivity: float = Form(0.5, description="Detection sensitivity"),
+    heal_mode: str = Form("full_inpaint", description="'full_inpaint' | 'calm_redness' | 'flatten_bump'"),
     texture_blend: float = Form(0.25, description="Skin texture blend ratio"),
     feather_radius: int = Form(3, description="Feather blur radius"),
     grain_intensity: float = Form(0.03, description="Micro-grain intensity"),
     dilate_radius: int = Form(3, description="Dilation radius"),
     gemini_api_key: Optional[str] = Form(None, description="Optional Gemini API key")
 ):
+    try:
+        image_bytes = await image.read()
+        pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image: {e}")
+
+    img_rgb = np.array(pil_image)
+    skin_mask, _ = segment_face_skin(img_rgb)
+    blobs, _ = detect_pimple_candidates(img_rgb, skin_mask, sensitivity=sensitivity)
+    blobs_json = json.dumps(blobs)
+
+    image.file.seek(0)
+
     return await apply_heal(
         image=image,
-        blobs_json=None,
+        blobs_json=blobs_json,
         mask=None,
+        heal_mode=heal_mode,
         texture_blend=texture_blend,
         feather_radius=feather_radius,
         grain_intensity=grain_intensity

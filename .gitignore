@@ -1,0 +1,19 @@
+# Python cache & compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Local config with user keys (optional)
+# backend/config.json
+
+# Environment / IDE
+.venv/
+env/
+venv/
+.idea/
+.vscode/
+
+# Temporary and test artifacts
+*.tmp
+temp/
