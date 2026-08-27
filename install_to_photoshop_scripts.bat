@@ -7,27 +7,56 @@ if %errorlevel% neq 0 (
     exit /b
 )
 
-title Install AI Blemish Remover to Photoshop 2020
+title Install AI Blemish Remover to Photoshop Scripts
 cd /d "%~dp0"
 echo =======================================================
-echo  Installing AI Blemish Remover to Photoshop 2020 Scripts
+echo  Installing AI Retouch Scripts to Photoshop Versions
 echo =======================================================
 
-set DEST=C:\Program Files\Adobe\Adobe Photoshop 2020\Presets\Scripts\AI_Blemish_Remover.jsx
+setlocal enabledelayedexpansion
+set FOUND_PS=0
 
-copy /Y "AI_Blemish_Remover.jsx" "%DEST%"
-
-if %errorlevel% equ 0 (
-    echo.
-    echo [SUCCESS] Script installed successfully to:
-    echo %DEST%
-    echo.
-    echo Now in Photoshop, simply go to:
-    echo    File ^> Scripts ^> AI_Blemish_Remover
-) else (
-    echo.
-    echo [!] Failed to copy script. Please check permissions.
+for /d %%P in ("C:\Program Files\Adobe\Adobe Photoshop *") do (
+    if exist "%%P\Presets\Scripts" (
+        echo [*] Discovered: %%P
+        copy /Y "AI_Blemish_Remover.jsx" "%%P\Presets\Scripts\AI_Blemish_Remover.jsx" >nul
+        copy /Y "AI_Blemish_Remover_Dialog.jsx" "%%P\Presets\Scripts\AI_Blemish_Remover_Dialog.jsx" >nul
+        if !errorlevel! equ 0 (
+            echo     [+] Successfully copied scripts to %%P\Presets\Scripts\
+            set FOUND_PS=1
+        ) else (
+            echo     [!] Failed copying to %%P
+        )
+    )
 )
 
-echo =======================================================
+for /d %%P in ("C:\Program Files (x86)\Adobe\Adobe Photoshop *") do (
+    if exist "%%P\Presets\Scripts" (
+        echo [*] Discovered: %%P
+        copy /Y "AI_Blemish_Remover.jsx" "%%P\Presets\Scripts\AI_Blemish_Remover.jsx" >nul
+        copy /Y "AI_Blemish_Remover_Dialog.jsx" "%%P\Presets\Scripts\AI_Blemish_Remover_Dialog.jsx" >nul
+        if !errorlevel! equ 0 (
+            echo     [+] Successfully copied scripts to %%P\Presets\Scripts\
+            set FOUND_PS=1
+        )
+    )
+)
+
+if %FOUND_PS% equ 0 (
+    echo [!] No Adobe Photoshop installations found in standard program folders.
+    echo     You can still run the script directly inside Photoshop via:
+    echo     File ^> Scripts ^> Browse... ^> AI_Blemish_Remover.jsx
+) else (
+    echo.
+    echo =======================================================
+    echo [SUCCESS] Scripts installed into Photoshop!
+    echo.
+    echo To use the AI plugin in Photoshop:
+    echo 1. Launch the backend: run backend\run_server.bat
+    echo 2. In Photoshop, open a portrait photo
+    echo 3. Go to: File ^> Scripts ^> AI_Blemish_Remover
+    echo =======================================================
+)
+
 pause
+

@@ -66,22 +66,34 @@ def frequency_separation_smooth(
         return img_rgb.copy(), skin_mask.copy()
 
     img_f = img_rgb.astype(np.float32)
+    dim = min(h, w)
+    
+    # Scale bilateral parameters dynamically based on portrait resolution
+    d_val = max(5, min(15, int(dim * 0.006) | 1))
+    sigma_space = max(5.0, min(25.0, dim * 0.008))
+    sigma_color = max(25.0, min(55.0, 30.0 + strength * 20.0))
 
-    # Edge-preserving base layer. Two passes give a deeper "beauty retouch" melt
-    # without destroying genuine edges the way a plain Gaussian would.
-    base = cv2.bilateralFilter(img_rgb, d=7, sigmaColor=35, sigmaSpace=7)
-    if strength >= 0.5:
-        base = cv2.bilateralFilter(base, d=7, sigmaColor=35, sigmaSpace=7)
+    # Edge-preserving base layer (bilateral filter preserves facial features, eyes, lips, jawline)
+    base = cv2.bilateralFilter(img_rgb, d=d_val, sigmaColor=sigma_color, sigmaSpace=sigma_space)
+    if strength >= 0.45:
+        base = cv2.bilateralFilter(base, d=d_val, sigmaColor=sigma_color * 0.8, sigmaSpace=sigma_space * 0.8)
     base_f = base.astype(np.float32)
 
     detail = img_f - base_f
 
-    # detail_scale: strength morphs between untouched (1.0) and texture_keep floor
+    # High-frequency detail attenuation with skin pore texture recovery
     strength = max(0.0, min(1.0, strength))
     texture_keep = max(0.05, min(1.0, texture_keep))
     detail_scale = 1.0 - strength * (1.0 - texture_keep)
 
-    smoothed = base_f + detail * detail_scale
+    smoothed = base_f + (detail * detail_scale)
+    
+    # Add subtle micro-pore preservation boost for high-end magazine finish
+    if texture_keep > 0.2:
+        gray_detail = cv2.cvtColor(np.abs(detail).clip(0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+        pore_mask = ((gray_detail > 3) & (gray_detail < 25)).astype(np.float32)[:, :, None]
+        smoothed = smoothed + (detail * pore_mask * (texture_keep * 0.25))
+
     smoothed = smoothed.clip(0, 255)
 
     # Confine to skin region with soft feathered blending
