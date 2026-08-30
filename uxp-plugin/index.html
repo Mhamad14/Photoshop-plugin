@@ -32,6 +32,7 @@
 
       <!-- Step 1: Auto-Detect Action Card -->
       <section class="detect-action-card">
+        <div class="step-kicker"><span class="step-number">01</span><span>START WITH A PORTRAIT</span></div>
         <button id="btn-auto-detect" class="primary-btn pulse-glow">
           <span class="btn-icon">&#9889;</span>
           <span class="btn-text" id="detect-btn-text">1. Analyze Portrait</span>
@@ -44,7 +45,10 @@
       <section class="preview-card" id="preview-section">
         <div class="preview-header">
           <div class="preview-title">
-            <span>Result Preview</span>
+            <div>
+              <span class="preview-heading">Result Preview</span>
+              <span class="preview-subtitle">Review before anything touches your document</span>
+            </div>
             <span id="preview-status" class="preview-pill pill-idle">Idle</span>
             <span id="blob-counter" class="pill-badge">0 Spots</span>
           </div>
@@ -119,8 +123,47 @@
         </div>
       </details>
 
+      <!-- Optional reviewed-data collection for the local YOLO training set -->
+      <details class="refine-drawer training-drawer">
+        <summary class="drawer-title">
+          <span>Training Mode: Save Reviewed Sample</span>
+          <svg class="chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </summary>
+        <div class="drawer-content training-content">
+          <label class="toggle-item">
+            <input type="checkbox" id="chk-training-mode">
+            <span>Label canvas clicks for the YOLO dataset</span>
+          </label>
+          <div class="training-row">
+            <label for="select-training-label">Click label</label>
+            <select id="select-training-label">
+              <option value="heal_blemish">Retouch blemish</option>
+              <option value="tone_irregularity">Tone irregularity</option>
+              <option value="preserve_mark">Preserve mark</option>
+              <option value="exclude">Exclude / false positive</option>
+            </select>
+          </div>
+          <div class="training-row">
+            <label for="select-training-split">Dataset split</label>
+            <select id="select-training-split">
+              <option value="train">Train</option>
+              <option value="val">Validation</option>
+              <option value="test">Locked test</option>
+            </select>
+          </div>
+          <label class="toggle-item">
+            <input type="checkbox" id="chk-training-consent">
+            <span>I have permission to use this portrait for model training.</span>
+          </label>
+          <button id="btn-export-training" class="secondary-btn">Save Reviewed Sample</button>
+          <p id="training-status" class="control-hint">Analyze, review detections, add missed spots, then save. Keep each person in one dataset split.</p>
+        </div>
+      </details>
+
       <!-- Feature Controls: Remove Blemishes -->
-      <section class="feature-card">
+      <section class="feature-card feature-heal">
         <div class="feature-header">
           <label class="checkbox-label">
             <input type="checkbox" id="chk-enable-heal" checked>
@@ -181,7 +224,7 @@
       </section>
 
       <!-- Feature Controls: AI Dodge & Burn -->
-      <section class="feature-card">
+      <section class="feature-card feature-db">
         <div class="feature-header">
           <label class="checkbox-label">
             <input type="checkbox" id="chk-enable-db" checked>
@@ -203,7 +246,7 @@
       </section>
 
       <!-- Feature Controls: Smooth Skin -->
-      <section class="feature-card">
+      <section class="feature-card feature-smooth">
         <div class="feature-header">
           <label class="checkbox-label">
             <input type="checkbox" id="chk-enable-smooth" checked>
@@ -233,7 +276,7 @@
       </section>
 
       <!-- Feature Controls: Tone Balancing & Lift -->
-      <section class="feature-card">
+      <section class="feature-card feature-lighten">
         <div class="feature-header">
           <label class="checkbox-label">
             <input type="checkbox" id="chk-enable-lighten" checked>
@@ -262,7 +305,7 @@
       </section>
 
       <!-- Feature Controls: Eyes & Teeth -->
-      <section class="feature-card">
+      <section class="feature-card feature-eyes">
         <div class="feature-header">
           <label class="checkbox-label">
             <input type="checkbox" id="chk-enable-eyes-teeth">
@@ -291,7 +334,7 @@
       </section>
 
       <!-- Feature Controls: Shine Neutralizer -->
-      <section class="feature-card">
+      <section class="feature-card feature-shine">
         <div class="feature-header">
           <label class="checkbox-label">
             <input type="checkbox" id="chk-enable-shine">
@@ -314,6 +357,7 @@
 
       <!-- Step 2: Apply to Photoshop -->
       <section class="apply-section">
+        <div class="step-kicker"><span class="step-number">02</span><span>COMMIT EDITABLE LAYERS</span></div>
         <button id="btn-apply-all" class="primary-btn execute-btn">
           <span class="btn-icon">&#10024;</span>
           <span class="btn-text" id="apply-btn-text">2. Apply to Photoshop</span>

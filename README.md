@@ -55,6 +55,14 @@ python backend/test_client.py
 
 ---
 
+### Optional: Build a Better Local Detector
+
+The panel includes an opt-in **Training Mode** under the AI refinement section. After analyzing a portrait, enable Training Mode, choose a click label, review every detection, and confirm that you have permission to use the portrait for training. Click **Save Reviewed Sample** to write the portrait, YOLO segmentation labels, and review metadata to `backend/training/data/retouch_skin/`.
+
+Training Mode does not train automatically and does not upload images. It only saves samples after explicit review and permission confirmation. See `backend/training/README.md` for annotation rules and the YOLOv8-seg training command.
+
+---
+
 ### Step 2: Load the UXP Plugin into Photoshop
 
 1. Open the **Adobe UXP Developer Tool** (available via Adobe Creative Cloud desktop app).

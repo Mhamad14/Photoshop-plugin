@@ -5,7 +5,9 @@ import logging
 import math
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import cv2
@@ -38,6 +40,12 @@ lama_model = None
 device_name = "cpu"
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
+TRAINING_DATASET_ROOT = Path(__file__).resolve().parent / "training" / "data" / "retouch_skin"
+TRAINING_CLASS_IDS = {
+    "heal_blemish": 0,
+    "tone_irregularity": 1,
+    "preserve_mark": 2,
+}
 
 def load_config() -> dict:
     if os.path.exists(CONFIG_PATH):
@@ -389,6 +397,125 @@ async def analyze_portrait(
         "blobs_count": len(blobs),
         "process_time_ms": process_time
     })
+
+
+def _blob_to_yolo_polygon(blob: Dict[str, Any], width: int, height: int, vertices: int = 20) -> Optional[str]:
+    """Turn an approved circular review blob into one YOLO segmentation polygon."""
+    try:
+        label = blob["training_label"]
+        class_id = TRAINING_CLASS_IDS[label]
+        cx, cy = blob["centroid"]
+        radius = max(1.0, float(blob.get("radius", 6)))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    points: List[str] = [str(class_id)]
+    for index in range(vertices):
+        angle = (2.0 * math.pi * index) / vertices
+        x = max(0.0, min(float(width), float(cx) + radius * math.cos(angle)))
+        y = max(0.0, min(float(height), float(cy) + radius * math.sin(angle)))
+        points.extend((f"{x / width:.6f}", f"{y / height:.6f}"))
+    return " ".join(points)
+
+
+@app.get("/training/status")
+async def training_status():
+    """Return local reviewed-sample counts without exposing any portrait files."""
+    splits: Dict[str, Dict[str, Any]] = {}
+    for split in ("train", "val", "test"):
+        image_dir = TRAINING_DATASET_ROOT / "images" / split
+        label_dir = TRAINING_DATASET_ROOT / "labels" / split
+        counts = {name: 0 for name in TRAINING_CLASS_IDS}
+        for label_path in label_dir.glob("*.txt") if label_dir.exists() else []:
+            for line in label_path.read_text(encoding="utf-8").splitlines():
+                if not line:
+                    continue
+                try:
+                    class_id = int(line.split(maxsplit=1)[0])
+                    class_name = next(name for name, value in TRAINING_CLASS_IDS.items() if value == class_id)
+                    counts[class_name] += 1
+                except (ValueError, StopIteration):
+                    continue
+        splits[split] = {
+            "images": len(list(image_dir.glob("*.png"))) if image_dir.exists() else 0,
+            "instances": counts,
+        }
+    return {"dataset_root": str(TRAINING_DATASET_ROOT), "splits": splits}
+
+
+@app.post("/training/export")
+async def export_reviewed_training_sample(
+    image: UploadFile = File(..., description="Reviewed portrait snapshot"),
+    blobs_json: str = Form("[]", description="Reviewed blob list with training_label values"),
+    split: str = Form("train", description="train | val | test"),
+    reviewed: bool = Form(False, description="Photographer confirms labels were reviewed")
+):
+    """Save a consented, reviewed portrait and YOLO-seg labels to the local training folder."""
+    if split not in {"train", "val", "test"}:
+        raise HTTPException(status_code=400, detail="split must be train, val, or test")
+    if not reviewed:
+        raise HTTPException(status_code=400, detail="Confirm that the sample was reviewed before exporting it for training.")
+
+    try:
+        image_bytes = await image.read()
+        pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        blobs = json.loads(blobs_json)
+        if not isinstance(blobs, list):
+            raise ValueError("blobs_json must be an array")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid training sample: {e}")
+
+    width, height = pil_image.size
+    approved_blobs = []
+    label_lines = []
+    class_counts = {name: 0 for name in TRAINING_CLASS_IDS}
+    for blob in blobs:
+        label = blob.get("training_label")
+        if label is None:
+            # Reviewed active detections become heal targets; ignored candidates
+            # are intentionally omitted unless explicitly marked preserve_mark.
+            label = "heal_blemish" if blob.get("active", True) else "exclude"
+        if label == "exclude":
+            continue
+        blob_copy = dict(blob)
+        blob_copy["training_label"] = label
+        line = _blob_to_yolo_polygon(blob_copy, width, height)
+        if line is None:
+            continue
+        label_lines.append(line)
+        approved_blobs.append(blob_copy)
+        class_counts[label] += 1
+
+    sample_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+    image_dir = TRAINING_DATASET_ROOT / "images" / split
+    label_dir = TRAINING_DATASET_ROOT / "labels" / split
+    metadata_dir = TRAINING_DATASET_ROOT / "metadata" / split
+    for directory in (image_dir, label_dir, metadata_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    image_path = image_dir / f"{sample_id}.png"
+    label_path = label_dir / f"{sample_id}.txt"
+    metadata_path = metadata_dir / f"{sample_id}.json"
+    pil_image.save(image_path, format="PNG", optimize=True)
+    label_path.write_text("\n".join(label_lines) + ("\n" if label_lines else ""), encoding="utf-8")
+    metadata_path.write_text(json.dumps({
+        "sample_id": sample_id,
+        "split": split,
+        "width": width,
+        "height": height,
+        "exported_at": time.time(),
+        "annotations": approved_blobs,
+    }, indent=2), encoding="utf-8")
+
+    logger.info("Saved reviewed training sample %s (%s, %d labels)", sample_id, split, len(label_lines))
+    return {
+        "status": "saved",
+        "sample_id": sample_id,
+        "split": split,
+        "labels": len(label_lines),
+        "class_counts": class_counts,
+        "image_path": str(image_path),
+    }
 
 
 @app.post("/preview")
