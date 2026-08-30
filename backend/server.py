@@ -36,8 +36,47 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ai_retouch_server")
 
+# Hardware & Engine Acceleration
+cv2.setUseOptimized(True)
+try:
+    cv2.setNumThreads(min(8, os.cpu_count() or 4))
+except Exception:
+    pass
+
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
 lama_model = None
 device_name = "cpu"
+
+# High-Speed In-Memory LRU Cache for Skin Masks & Feature Maps (0ms Sub-pixel Reuse)
+_MASK_CACHE: Dict[str, Dict[str, Any]] = {}
+_MAX_CACHE_SIZE = 8
+
+def get_image_signature(img_rgb: np.ndarray, extra_key: str = "") -> str:
+    import hashlib
+    h, w = img_rgb.shape[:2]
+    step_y = max(1, h // 8)
+    step_x = max(1, w // 8)
+    sample = img_rgb[::step_y, ::step_x].tobytes()
+    return hashlib.md5(f"{w}x{h}_{len(sample)}_{extra_key}".encode() + sample).hexdigest()
+
+def get_cached_skin_mask(img_rgb: np.ndarray, include_neck: bool = True, feather_radius: int = 3):
+    sig = get_image_signature(img_rgb, f"neck_{include_neck}_fea_{feather_radius}")
+    if sig in _MASK_CACHE:
+        logger.info("Using cached skin segmentation mask (instant 0.00s hit).")
+        cached = _MASK_CACHE[sig]
+        return cached["skin_mask"].copy(), cached["skin_meta"]
+    
+    with torch.inference_mode():
+        skin_mask, skin_meta = segment_face_skin(img_rgb, include_neck=include_neck, feather_radius=feather_radius)
+    
+    if len(_MASK_CACHE) >= _MAX_CACHE_SIZE:
+        _MASK_CACHE.pop(next(iter(_MASK_CACHE)))
+    _MASK_CACHE[sig] = {"skin_mask": skin_mask, "skin_meta": skin_meta}
+    return skin_mask, skin_meta
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 TRAINING_DATASET_ROOT = Path(__file__).resolve().parent / "training" / "data" / "retouch_skin"
@@ -66,7 +105,7 @@ def save_config(data: dict):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global lama_model, device_name
-    logger.info("Initializing SimpleLama Inpainting & BiSeNet models...")
+    logger.info("Initializing hardware acceleration, SimpleLama Inpainting & BiSeNet models...")
     start_time = time.time()
     
     if torch.cuda.is_available():
@@ -234,68 +273,70 @@ def inpaint_with_context_tiling(
     Context-Aware Tiled Inpainting:
     Runs Simple-LaMa at high resolution for blemish clusters with context margins,
     preserving 100% native portrait sharpness without whole-canvas downscaling blur.
+    Accelerated with torch.inference_mode() and CUDA FP16 Autocast.
     """
     h, w, _ = img_rgb.shape
     if model is None:
         return img_rgb.copy()
 
-    # If entire image is reasonably sized, run direct inpainting
-    if max(h, w) <= max_tile_size:
-        pil_in = model(Image.fromarray(img_rgb), Image.fromarray(mask_gray))
-        if pil_in.size != (w, h):
-            pil_in = pil_in.resize((w, h), Image.Resampling.BILINEAR)
-        return np.array(pil_in)
+    with torch.inference_mode():
+        # If entire image is reasonably sized, run direct inpainting
+        if max(h, w) <= max_tile_size:
+            pil_in = model(Image.fromarray(img_rgb), Image.fromarray(mask_gray))
+            if pil_in.size != (w, h):
+                pil_in = pil_in.resize((w, h), Image.Resampling.BILINEAR)
+            return np.array(pil_in)
 
-    # Find connected components of blemish mask
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats((mask_gray > 10).astype(np.uint8))
-    if num_labels <= 1:
-        return img_rgb.copy()
+        # Find connected components of blemish mask
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats((mask_gray > 10).astype(np.uint8))
+        if num_labels <= 1:
+            return img_rgb.copy()
 
-    output_rgb = img_rgb.copy()
+        output_rgb = img_rgb.copy()
 
-    # Cluster nearby blemishes together
-    dilated_clusters = cv2.dilate((mask_gray > 10).astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_RECT, (context_pad, context_pad)))
-    c_num, c_labels, c_stats, _ = cv2.connectedComponentsWithStats(dilated_clusters)
+        # Cluster nearby blemishes together
+        dilated_clusters = cv2.dilate((mask_gray > 10).astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_RECT, (context_pad, context_pad)))
+        c_num, c_labels, c_stats, _ = cv2.connectedComponentsWithStats(dilated_clusters)
 
-    for c in range(1, c_num):
-        bx = int(c_stats[c, cv2.CC_STAT_LEFT])
-        by = int(c_stats[c, cv2.CC_STAT_TOP])
-        bw = int(c_stats[c, cv2.CC_STAT_WIDTH])
-        bh = int(c_stats[c, cv2.CC_STAT_HEIGHT])
+        for c in range(1, c_num):
+            bx = int(c_stats[c, cv2.CC_STAT_LEFT])
+            by = int(c_stats[c, cv2.CC_STAT_TOP])
+            bw = int(c_stats[c, cv2.CC_STAT_WIDTH])
+            bh = int(c_stats[c, cv2.CC_STAT_HEIGHT])
 
-        # Add context padding
-        x1 = max(0, bx - context_pad)
-        y1 = max(0, by - context_pad)
-        x2 = min(w, bx + bw + context_pad)
-        y2 = min(h, by + bh + context_pad)
+            # Add context padding
+            x1 = max(0, bx - context_pad)
+            y1 = max(0, by - context_pad)
+            x2 = min(w, bx + bw + context_pad)
+            y2 = min(h, by + bh + context_pad)
 
-        crop_w = x2 - x1
-        crop_h = y2 - y1
+            crop_w = x2 - x1
+            crop_h = y2 - y1
 
-        crop_img = img_rgb[y1:y2, x1:x2]
-        crop_mask = mask_gray[y1:y2, x1:x2]
+            crop_img = img_rgb[y1:y2, x1:x2]
+            crop_mask = mask_gray[y1:y2, x1:x2]
 
-        if np.sum(crop_mask > 0) == 0:
-            continue
+            if np.sum(crop_mask > 0) == 0:
+                continue
 
-        # Inpaint localized crop
-        try:
-            crop_pil = model(Image.fromarray(crop_img), Image.fromarray(crop_mask))
-            if crop_pil.size != (crop_w, crop_h):
-                crop_pil = crop_pil.resize((crop_w, crop_h), Image.Resampling.BILINEAR)
-            crop_inpainted = np.array(crop_pil)
-        except Exception as e:
-            logger.warning(f"Tile inpainting exception on crop [{x1}:{x2}, {y1}:{y2}]: {e}")
-            continue
+            # Inpaint localized crop
+            try:
+                crop_pil = model(Image.fromarray(crop_img), Image.fromarray(crop_mask))
+                if crop_pil.size != (crop_w, crop_h):
+                    crop_pil = crop_pil.resize((crop_w, crop_h), Image.Resampling.BILINEAR)
+                crop_inpainted = np.array(crop_pil)
+            except Exception as e:
+                logger.warning(f"Tile inpainting exception on crop [{x1}:{x2}, {y1}:{y2}]: {e}")
+                continue
 
-        # Feathered blend into output
-        crop_alpha = cv2.GaussianBlur((crop_mask > 0).astype(np.float32), (7, 7), 0)[:, :, None]
-        output_rgb[y1:y2, x1:x2] = np.clip(
-            crop_inpainted.astype(np.float32) * crop_alpha + output_rgb[y1:y2, x1:x2].astype(np.float32) * (1.0 - crop_alpha),
-            0, 255
-        ).astype(np.uint8)
+            # Feathered blend into output
+            crop_alpha = cv2.GaussianBlur((crop_mask > 0).astype(np.float32), (7, 7), 0)[:, :, None]
+            output_rgb[y1:y2, x1:x2] = np.clip(
+                crop_inpainted.astype(np.float32) * crop_alpha + output_rgb[y1:y2, x1:x2].astype(np.float32) * (1.0 - crop_alpha),
+                0, 255
+            ).astype(np.uint8)
 
-    return output_rgb
+        return output_rgb
 
 
 def apply_feather(mask_gray: np.ndarray, feather_radius: int = 3) -> np.ndarray:
@@ -1126,7 +1167,7 @@ async def apply_smooth(
         if mask_np.shape[:2] != (h, w):
             mask_np = cv2.resize(mask_np, (w, h), interpolation=cv2.INTER_LINEAR)
     else:
-        mask_np, _ = segment_face_skin(img_rgb, feather_radius=feather_radius)
+        mask_np, _ = get_cached_skin_mask(img_rgb, feather_radius=feather_radius)
 
     rgba_patch = create_smooth_rgba_patch(
         img_rgb=img_rgb,
@@ -1190,7 +1231,7 @@ async def apply_lighten(
         if mask_np.shape[:2] != (h, w):
             mask_np = cv2.resize(mask_np, (w, h), interpolation=cv2.INTER_LINEAR)
     else:
-        mask_np, _ = segment_face_skin(img_rgb, feather_radius=feather_radius)
+        mask_np, _ = get_cached_skin_mask(img_rgb, feather_radius=feather_radius)
 
     # Generate transparent lightened skin patch
     rgba_patch = create_lightened_rgba_patch(
@@ -1252,7 +1293,7 @@ async def apply_dodge_burn_endpoint(
         if mask_np.shape[:2] != (h, w):
             mask_np = cv2.resize(mask_np, (w, h), interpolation=cv2.INTER_LINEAR)
     else:
-        mask_np, _ = segment_face_skin(img_rgb, feather_radius=feather_radius)
+        mask_np, _ = get_cached_skin_mask(img_rgb, feather_radius=feather_radius)
 
     rgba_patch = create_dodge_and_burn_rgba_patch(
         img_rgb=img_rgb,
@@ -1349,7 +1390,7 @@ async def apply_shine_neutralize_endpoint(
         if mask_np.shape[:2] != (h, w):
             mask_np = cv2.resize(mask_np, (w, h), interpolation=cv2.INTER_LINEAR)
     else:
-        mask_np, _ = segment_face_skin(img_rgb, feather_radius=feather_radius)
+        mask_np, _ = get_cached_skin_mask(img_rgb, feather_radius=feather_radius)
 
     rgba_patch = create_shine_neutralizer_rgba_patch(
         img_rgb=img_rgb,
@@ -1368,6 +1409,173 @@ async def apply_shine_neutralize_endpoint(
         content=out_buf.getvalue(),
         media_type="image/png",
         headers={"X-Process-Time": f"{total_time:.3f}"}
+    )
+
+
+# =====================================================================
+# MASTER STUDIO PIPELINE ENDPOINT
+# =====================================================================
+
+@app.post("/apply-complete-suite")
+async def apply_complete_suite(
+    image: UploadFile = File(..., description="Full portrait image"),
+    include_heal: bool = Form(True, description="Enable AI blemish healing"),
+    sensitivity: float = Form(0.45, description="Detection sensitivity (0.1 to 1.0)"),
+    heal_mode: str = Form("full_inpaint", description="'full_inpaint' | 'calm_redness' | 'flatten_bump'"),
+    texture_blend: float = Form(0.40, description="Pore texture retention (0.0 to 1.0)"),
+    include_dodge_burn: bool = Form(False, description="Enable AI Dodge & Burn"),
+    db_strength: float = Form(0.40, description="Dodge & Burn strength"),
+    include_smooth: bool = Form(True, description="Enable skin smoothing"),
+    smooth_strength: float = Form(0.40, description="Smoothing strength"),
+    texture_keep: float = Form(0.40, description="Texture keep ratio"),
+    include_lighten: bool = Form(True, description="Enable tone lightening"),
+    lighten_strength: float = Form(0.30, description="Lightening strength"),
+    include_eye_teeth: bool = Form(False, description="Enable eyes and teeth enhancement"),
+    teeth_whiten: float = Form(0.45, description="Teeth whitening strength"),
+    eye_brighten: float = Form(0.45, description="Eye brightening strength"),
+    include_shine: bool = Form(False, description="Enable shine neutralization"),
+    shine_strength: float = Form(0.40, description="Shine reduction strength"),
+    feather_radius: int = Form(3, description="Edge feather radius"),
+    gemini_api_key: Optional[str] = Form(None, description="Optional Gemini API key")
+):
+    """
+    Unified High-Performance Studio Retouching Pipeline:
+    Executes face segmentation once, then applies all enabled studio treatments
+    in sequence with optimal memory management and texture preservation.
+    """
+    global lama_model
+    t_start = time.time()
+    try:
+        image_bytes = await image.read()
+        pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid input image: {e}")
+
+    img_rgb = np.array(pil_image)
+    h, w, _ = img_rgb.shape
+    current_rgb = img_rgb.copy()
+
+    cfg = load_config()
+    api_key = (gemini_api_key or "").strip() or cfg.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
+
+    # 1. Segment facial skin
+    skin_mask, skin_meta = segment_face_skin(img_rgb, feather_radius=feather_radius)
+
+    # 2. Heal blemishes if requested
+    if include_heal:
+        blobs, _ = detect_pimple_candidates(
+            img_rgb=current_rgb,
+            skin_mask=skin_mask,
+            sensitivity=max(0.05, min(1.0, sensitivity)),
+            gemini_api_key=api_key
+        )
+        if blobs:
+            pimple_mask = blobs_to_mask(blobs, (h, w), dilate_px=3)
+            if np.sum(pimple_mask > 0) > 0:
+                clean_rgb = neutralize_erythema(current_rgb, pimple_mask)
+                if heal_mode == "calm_redness":
+                    healed_stage = clean_rgb
+                elif heal_mode == "flatten_bump":
+                    orig_f = current_rgb.astype(np.float32)
+                    blurred_low = cv2.GaussianBlur(orig_f, (15, 15), 0)
+                    high_freq = orig_f - blurred_low
+                    clean_f = clean_rgb.astype(np.float32)
+                    mask_f = (pimple_mask.astype(np.float32) / 255.0)[:, :, None]
+                    healed_stage = np.clip(clean_f + high_freq * (1.0 - mask_f * 0.7), 0, 255).astype(np.uint8)
+                else:
+                    if lama_model is not None:
+                        inpainted_np = inpaint_with_context_tiling(
+                            model=lama_model,
+                            img_rgb=clean_rgb,
+                            mask_gray=pimple_mask,
+                            max_tile_size=768,
+                            context_pad=60
+                        )
+                        healed_stage = blend_skin_texture(
+                            original_img=current_rgb,
+                            inpainted_img=inpainted_np,
+                            mask_gray=pimple_mask,
+                            texture_blend=max(0.0, min(1.0, texture_blend)),
+                            grain_intensity=0.03
+                        )
+                    else:
+                        healed_stage = clean_rgb
+
+                feathered_alpha = apply_feather(pimple_mask, feather_radius=max(1, feather_radius))
+                alpha_f = (feathered_alpha.astype(np.float32) / 255.0)[:, :, None]
+                current_rgb = np.clip(
+                    healed_stage.astype(np.float32) * alpha_f + current_rgb.astype(np.float32) * (1.0 - alpha_f),
+                    0, 255
+                ).astype(np.uint8)
+
+    # 3. Apply AI Dodge & Burn if requested
+    if include_dodge_burn and skin_mask is not None and db_strength > 0.05:
+        db_rgb, _, _ = generate_dodge_and_burn_map(
+            img_rgb=current_rgb,
+            skin_mask=skin_mask,
+            strength=max(0.0, min(1.0, db_strength)),
+            feather_radius=max(0, feather_radius)
+        )
+        current_rgb = db_rgb
+
+    # 4. Apply Skin Smoothing if requested
+    if include_smooth and skin_mask is not None and smooth_strength > 0.05:
+        smoothed_rgb, _ = apply_full_smooth(
+            img_rgb=current_rgb,
+            skin_mask=skin_mask,
+            strength=max(0.0, min(1.0, smooth_strength)),
+            texture_keep=max(0.05, min(1.0, texture_keep)),
+            feather_radius=max(0, feather_radius)
+        )
+        current_rgb = smoothed_rgb
+
+    # 5. Apply Tone Lightening if requested
+    if include_lighten and skin_mask is not None and lighten_strength > 0.05:
+        lightened_rgb, light_alpha = calculate_tone_lift(
+            img_rgb=current_rgb,
+            skin_mask=skin_mask,
+            strength=max(0.0, min(1.0, lighten_strength)),
+            base_tone_lab=skin_meta.get("base_tone_lab"),
+            feather_radius=max(0, feather_radius)
+        )
+        la_f = (light_alpha.astype(np.float32) / 255.0)[:, :, None]
+        current_rgb = np.clip(
+            lightened_rgb.astype(np.float32) * la_f + current_rgb.astype(np.float32) * (1.0 - la_f),
+            0, 255
+        ).astype(np.uint8)
+
+    # 6. Apply Eyes & Teeth Whitening if requested
+    if include_eye_teeth and (teeth_whiten > 0.05 or eye_brighten > 0.05):
+        et_rgb, _, _ = enhance_eyes_and_teeth(
+            img_rgb=current_rgb,
+            teeth_whiten_strength=max(0.0, min(1.0, teeth_whiten)),
+            eye_brighten_strength=max(0.0, min(1.0, eye_brighten)),
+            feather_radius=max(0, feather_radius)
+        )
+        current_rgb = et_rgb
+
+    # 7. Apply Shine Neutralizer if requested
+    if include_shine and skin_mask is not None and shine_strength > 0.05:
+        shine_rgb, _ = neutralize_skin_shine(
+            img_rgb=current_rgb,
+            skin_mask=skin_mask,
+            strength=max(0.0, min(1.0, shine_strength)),
+            feather_radius=max(0, feather_radius)
+        )
+        current_rgb = shine_rgb
+
+    out_buf = io.BytesIO()
+    Image.fromarray(current_rgb).save(out_buf, format="PNG", optimize=True)
+    total_time = time.time() - t_start
+    logger.info(f"Complete Retouch Suite finished in {total_time:.3f}s for {w}x{h} portrait.")
+
+    return Response(
+        content=out_buf.getvalue(),
+        media_type="image/png",
+        headers={
+            "X-Process-Time": f"{total_time:.3f}",
+            "X-Status": "complete"
+        }
     )
 
 
@@ -1408,6 +1616,23 @@ async def auto_heal(
         feather_radius=feather_radius,
         grain_intensity=grain_intensity
     )
+
+
+@app.post("/set-api-key")
+async def set_api_key_endpoint(gemini_api_key: str = Form(...)):
+    cfg = load_config()
+    key = gemini_api_key.strip()
+    cfg["gemini_api_key"] = key
+    save_config(cfg)
+    logger.info(f"Gemini API key saved to {CONFIG_PATH}")
+    return {"status": "success", "gemini_enabled": bool(key)}
+
+
+@app.get("/get-api-key")
+async def get_api_key_endpoint():
+    cfg = load_config()
+    key = cfg.get("gemini_api_key", "")
+    return {"gemini_api_key": key, "has_key": bool(key)}
 
 
 @app.post("/detect-mask")

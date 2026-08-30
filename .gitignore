@@ -4,8 +4,8 @@ __pycache__/
 *$py.class
 *.pyc
 
-# Local config with user keys (optional)
-# backend/config.json
+# Local config with user keys
+backend/config.json
 
 # Environment / IDE
 .venv/
