@@ -1451,6 +1451,17 @@ btnApplyAll.addEventListener("click", async () => {
     const portraitBlob = await exportFullPortrait();
     const placedNames = [];
 
+    // Heal chain: when healing is enabled, downstream layers (D&B, Smooth,
+    // Shine) must be computed from the HEALED base — otherwise the original
+    // blemish pixels show back through their skin-mask alpha.
+    const healChainBlobs = doHeal ? currentBlobs.filter(b => b.active !== false) : [];
+    const healChainActive = healChainBlobs.length > 0;
+    const healChainParams = {
+      heal_mode: "full_inpaint",
+      texture_blend: (parseInt(sliderTexture.value, 10) / 100).toString(),
+      grain_intensity: (parseInt(sliderGrain.value, 10) / 100).toString()
+    };
+
     /* ACTION 1: Remove Pimples (LaMa inpainting) */
     if (doHeal) {
       const activeBlobs = currentBlobs.filter(b => b.active !== false);
@@ -1464,6 +1475,9 @@ btnApplyAll.addEventListener("click", async () => {
         healForm.append("texture_blend", (parseInt(sliderTexture.value, 10) / 100).toString());
         healForm.append("feather_radius", sliderFeather.value);
         healForm.append("grain_intensity", (parseInt(sliderGrain.value, 10) / 100).toString());
+        // Skin mask keeps the healer's baseline sampling on real skin pixels
+        // (prevents grey patches next to nostrils / nose folds).
+        if (currentSkinMaskBlob) healForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
 
         const healRes = await fetch(`${getServerUrl()}/apply-heal`, { method: "POST", body: healForm });
         if (!healRes.ok) throw new Error(`Healing failed: ${await healRes.text()}`);
@@ -1484,6 +1498,12 @@ btnApplyAll.addEventListener("click", async () => {
       dbForm.append("strength", (parseInt(sliderDbStrength.value, 10) / 100).toString());
       dbForm.append("feather_radius", sliderFeather.value);
       if (currentSkinMaskBlob) dbForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
+      if (healChainActive) {
+        dbForm.append("blobs_json", JSON.stringify(healChainBlobs));
+        dbForm.append("heal_mode", healChainParams.heal_mode);
+        dbForm.append("texture_blend", healChainParams.texture_blend);
+        dbForm.append("grain_intensity", healChainParams.grain_intensity);
+      }
 
       const dbRes = await fetch(`${getServerUrl()}/apply-dodge-burn`, { method: "POST", body: dbForm });
       if (dbRes.ok) {
@@ -1504,6 +1524,12 @@ btnApplyAll.addEventListener("click", async () => {
       smoothForm.append("texture_keep", (parseInt(sliderTextureKeep.value, 10) / 100).toString());
       smoothForm.append("feather_radius", sliderFeather.value);
       if (currentSkinMaskBlob) smoothForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
+      if (healChainActive) {
+        smoothForm.append("blobs_json", JSON.stringify(healChainBlobs));
+        smoothForm.append("heal_mode", healChainParams.heal_mode);
+        smoothForm.append("texture_blend", healChainParams.texture_blend);
+        smoothForm.append("grain_intensity", healChainParams.grain_intensity);
+      }
 
       const smoothRes = await fetch(`${getServerUrl()}/apply-smooth`, { method: "POST", body: smoothForm });
       if (!smoothRes.ok) throw new Error(`Smoothing failed: ${await smoothRes.text()}`);
@@ -1550,6 +1576,12 @@ btnApplyAll.addEventListener("click", async () => {
       shineForm.append("strength", (parseInt(sliderShine.value, 10) / 100).toString());
       shineForm.append("feather_radius", "4");
       if (currentSkinMaskBlob) shineForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
+      if (healChainActive) {
+        shineForm.append("blobs_json", JSON.stringify(healChainBlobs));
+        shineForm.append("heal_mode", healChainParams.heal_mode);
+        shineForm.append("texture_blend", healChainParams.texture_blend);
+        shineForm.append("grain_intensity", healChainParams.grain_intensity);
+      }
 
       const shineRes = await fetch(`${getServerUrl()}/apply-shine-neutralize`, { method: "POST", body: shineForm });
       if (shineRes.ok) {

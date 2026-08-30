@@ -532,9 +532,11 @@ async def preview_result(
         except Exception:
             parsed_lab = None
 
-    # Cached skin mask (preferred) or fresh segmentation fallback
+    # Cached skin mask (preferred) or fresh segmentation fallback.
+    # Also required for heal-only previews: the spot healer uses it to keep its
+    # baseline/tone-matching sampling on real skin pixels (no grey nose patches).
     mask_np = None
-    if include_lighten or include_smooth or include_db or include_shine:
+    if include_heal or include_lighten or include_smooth or include_db or include_shine:
         if skin_mask is not None:
             try:
                 mask_bytes = await skin_mask.read()
@@ -584,7 +586,8 @@ async def preview_result(
                     texture_blend=max(0.0, min(1.0, texture_blend)),
                     dilate_px=3,
                     feather_radius=max(1, feather_radius),
-                    grain_intensity=max(0.0, min(0.2, grain_intensity))
+                    grain_intensity=max(0.0, min(0.2, grain_intensity)),
+                    skin_mask=mask_np
                 )
                 current_rgb = healed_composite
 
@@ -969,6 +972,7 @@ async def apply_heal(
     image: UploadFile = File(..., description="Portrait image"),
     blobs_json: Optional[str] = Form(None, description="JSON list of blobs to heal"),
     mask: Optional[UploadFile] = File(None, description="Optional binary mask image upload"),
+    skin_mask: Optional[UploadFile] = File(None, description="Optional skin mask PNG from /analyze (keeps heal baseline sampling on real skin)"),
     heal_mode: str = Form("full_inpaint", description="'full_inpaint' | 'calm_redness' | 'flatten_bump'"),
     texture_blend: float = Form(0.25, description="Skin texture blend ratio (0.0 to 1.0)"),
     feather_radius: int = Form(3, description="Feather blur radius in pixels"),
@@ -991,6 +995,7 @@ async def apply_heal(
     h, w, _ = img_rgb.shape
 
     # Construct mask from blobs or uploaded mask
+    blobs: List[Dict[str, Any]] = []
     if blobs_json:
         try:
             blobs = json.loads(blobs_json)
@@ -1008,6 +1013,23 @@ async def apply_heal(
         if mask_np.shape[:2] != (h, w):
             mask_np = cv2.resize(mask_np, (w, h), interpolation=cv2.INTER_NEAREST)
         mask_np = np.where(mask_np > 10, 255, 0).astype(np.uint8)
+        # The spot healer works from blob circles; derive them from the mask's
+        # connected components so the painted-mask path (legacy /heal-blemish)
+        # actually heals instead of returning an empty transparent patch.
+        num_labels, _, cc_stats, _ = cv2.connectedComponentsWithStats((mask_np > 10).astype(np.uint8))
+        for i in range(1, num_labels):
+            area = int(cc_stats[i, cv2.CC_STAT_AREA])
+            if area < 6:
+                continue
+            cx = float(cc_stats[i, cv2.CC_STAT_LEFT] + cc_stats[i, cv2.CC_STAT_WIDTH] / 2.0)
+            cy = float(cc_stats[i, cv2.CC_STAT_TOP] + cc_stats[i, cv2.CC_STAT_HEIGHT] / 2.0)
+            blobs.append({
+                "centroid": [cx, cy],
+                "radius": max(3.0, math.sqrt(area / math.pi)),
+                "active": True,
+                "label": "painted_mask",
+                "source": "mask_upload"
+            })
     else:
         raise HTTPException(status_code=400, detail="Either blobs_json or mask file is required.")
 
@@ -1018,16 +1040,35 @@ async def apply_heal(
         transparent_empty.save(out_buf, format="PNG")
         return Response(content=out_buf.getvalue(), media_type="image/png", headers={"X-Healed-Pixels": "0"})
 
+    # Facial skin segmentation for the healer: with it, the erythema baseline
+    # and tone-matching ring only sample real skin pixels, so heals beside
+    # nostrils / nose folds don't render grey patches or reddish residue.
+    sm_np = None
+    if skin_mask is not None:
+        try:
+            sm_bytes = await skin_mask.read()
+            sm_pil = Image.open(io.BytesIO(sm_bytes))
+            sm_np = np.array(sm_pil.split()[3]) if sm_pil.mode == "RGBA" else np.array(sm_pil.convert("L"))
+            if sm_np.shape[:2] != (h, w):
+                sm_np = cv2.resize(sm_np, (w, h), interpolation=cv2.INTER_LINEAR)
+        except Exception as e:
+            logger.warning(f"Failed to read skin mask for heal: {e}")
+            sm_np = None
+    if sm_np is None:
+        # Usually a cache hit: /analyze already segmented this exact snapshot.
+        sm_np, _ = get_cached_skin_mask(img_rgb, feather_radius=feather_radius)
+
     from spot_healer import spot_healing_brush_inpaint
     healed_rgb, feathered_alpha = spot_healing_brush_inpaint(
         img_rgb=img_rgb,
-        blobs=blobs if blobs_json else [],
+        blobs=blobs,
         lama_model=lama_model,
         heal_mode=heal_mode,
         texture_blend=max(0.0, min(1.0, texture_blend)),
         dilate_px=4,
         feather_radius=max(1, feather_radius),
-        grain_intensity=max(0.0, min(0.2, grain_intensity))
+        grain_intensity=max(0.0, min(0.2, grain_intensity)),
+        skin_mask=sm_np
     )
 
     # 5. Build transparent RGBA PNG for non-destructive placement
@@ -1052,13 +1093,71 @@ async def apply_heal(
     )
 
 
+async def apply_healed_base(
+    img_rgb: np.ndarray,
+    blobs_json: Optional[str],
+    heal_mode: str,
+    texture_blend: float,
+    grain_intensity: float,
+    feather_radius: int,
+    skin_mask: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """
+    Shared upstream heal composite for downstream studio layers.
+
+    The Smooth / Dodge&Burn / Shine patches sit ABOVE the healed layer in
+    Photoshop, and their alpha covers the whole skin region. If they were
+    computed from the original portrait, the original blemish pixels would
+    show back through and the healing would appear undone. Each downstream
+    Apply endpoint therefore composites the SAME heal first (identical to
+    the heal layer the user already placed) and computes its effect from
+    that healed base — matching what the live preview shows.
+
+    skin_mask is forwarded to the spot healer so its baseline/tone-ring
+    sampling stays on real skin pixels (prevents grey nose patches).
+    """
+    if not blobs_json:
+        return img_rgb
+
+    try:
+        blobs = json.loads(blobs_json)
+    except Exception:
+        return img_rgb
+
+    active = [b for b in blobs if b.get("active", True)]
+    if not active or lama_model is None:
+        return img_rgb
+
+    try:
+        from spot_healer import spot_healing_brush_inpaint
+        healed, _ = spot_healing_brush_inpaint(
+            img_rgb=img_rgb,
+            blobs=active,
+            lama_model=lama_model,
+            heal_mode=heal_mode,
+            texture_blend=max(0.0, min(1.0, texture_blend)),
+            dilate_px=4,
+            feather_radius=max(1, feather_radius),
+            grain_intensity=max(0.0, min(0.2, grain_intensity)),
+            skin_mask=skin_mask
+        )
+        return healed
+    except Exception as e:
+        logger.warning(f"Upstream heal composite failed, using original: {e}")
+        return img_rgb
+
+
 @app.post("/apply-smooth")
 async def apply_smooth(
     image: UploadFile = File(..., description="Portrait image"),
     skin_mask: Optional[UploadFile] = File(None, description="Optional skin mask PNG"),
     strength: float = Form(0.45, description="Smoothing strength 0-1"),
     texture_keep: float = Form(0.4, description="Pore/texture retention 0-1"),
-    feather_radius: int = Form(4, description="Edge feather radius")
+    feather_radius: int = Form(4, description="Edge feather radius"),
+    blobs_json: Optional[str] = Form(None, description="Active heal blobs: composite heal first so smoothed pixels are blemish-free"),
+    heal_mode: str = Form("full_inpaint", description="Heal mode used for the upstream composite"),
+    texture_blend: float = Form(0.25, description="Heal texture blend (upstream composite)"),
+    grain_intensity: float = Form(0.03, description="Heal micro-grain (upstream composite)")
 ):
     """
     Layer 5 Action: Smooth Skin.
@@ -1075,6 +1174,8 @@ async def apply_smooth(
     img_rgb = np.array(pil_image)
     h, w, _ = img_rgb.shape
 
+    # Skin mask first (uploaded or cached segmentation): the upstream heal
+    # composite needs it to keep baseline sampling on real skin pixels.
     if skin_mask is not None:
         mask_bytes = await skin_mask.read()
         mask_pil = Image.open(io.BytesIO(mask_bytes))
@@ -1083,6 +1184,8 @@ async def apply_smooth(
             mask_np = cv2.resize(mask_np, (w, h), interpolation=cv2.INTER_LINEAR)
     else:
         mask_np, _ = get_cached_skin_mask(img_rgb, feather_radius=feather_radius)
+
+    img_rgb = await apply_healed_base(img_rgb, blobs_json, heal_mode, texture_blend, grain_intensity, feather_radius, skin_mask=mask_np)
 
     rgba_patch = create_smooth_rgba_patch(
         img_rgb=img_rgb,
@@ -1182,7 +1285,11 @@ async def apply_dodge_burn_endpoint(
     skin_mask: Optional[UploadFile] = File(None, description="Optional skin mask PNG"),
     strength: float = Form(0.5, ge=0.0, le=1.0, description="D&B strength"),
     softness: float = Form(0.6, ge=0.1, le=1.0, description="Tonal scale softness"),
-    feather_radius: int = Form(4, ge=0, le=20, description="Edge feather radius")
+    feather_radius: int = Form(4, ge=0, le=20, description="Edge feather radius"),
+    blobs_json: Optional[str] = Form(None, description="Active heal blobs: composite heal first so D&B is computed on blemish-free skin"),
+    heal_mode: str = Form("full_inpaint", description="Heal mode used for the upstream composite"),
+    texture_blend: float = Form(0.25, description="Heal texture blend (upstream composite)"),
+    grain_intensity: float = Form(0.03, description="Heal micro-grain (upstream composite)")
 ):
     """
     AI Dodge & Burn: Generates transparent RGBA patch evening out micro-shadows
@@ -1198,6 +1305,8 @@ async def apply_dodge_burn_endpoint(
     img_rgb = np.array(pil_image)
     h, w, _ = img_rgb.shape
 
+    # Skin mask first (uploaded or cached segmentation): the upstream heal
+    # composite needs it to keep baseline sampling on real skin pixels.
     if skin_mask is not None:
         mask_bytes = await skin_mask.read()
         mask_pil = Image.open(io.BytesIO(mask_bytes))
@@ -1209,6 +1318,8 @@ async def apply_dodge_burn_endpoint(
             mask_np = cv2.resize(mask_np, (w, h), interpolation=cv2.INTER_LINEAR)
     else:
         mask_np, _ = get_cached_skin_mask(img_rgb, feather_radius=feather_radius)
+
+    img_rgb = await apply_healed_base(img_rgb, blobs_json, heal_mode, texture_blend, grain_intensity, feather_radius, skin_mask=mask_np)
 
     rgba_patch = create_dodge_and_burn_rgba_patch(
         img_rgb=img_rgb,
@@ -1280,7 +1391,11 @@ async def apply_shine_neutralize_endpoint(
     skin_mask: Optional[UploadFile] = File(None, description="Optional skin mask PNG"),
     strength: float = Form(0.5, ge=0.0, le=1.0, description="Shine reduction strength"),
     threshold: float = Form(0.75, ge=0.5, le=0.95, description="Luminance shine threshold"),
-    feather_radius: int = Form(4, ge=0, le=20, description="Feather radius")
+    feather_radius: int = Form(4, ge=0, le=20, description="Feather radius"),
+    blobs_json: Optional[str] = Form(None, description="Active heal blobs: composite heal first so shine removal is computed on blemish-free skin"),
+    heal_mode: str = Form("full_inpaint", description="Heal mode used for the upstream composite"),
+    texture_blend: float = Form(0.25, description="Heal texture blend (upstream composite)"),
+    grain_intensity: float = Form(0.03, description="Heal micro-grain (upstream composite)")
 ):
     """
     AI Shine & Flash Glare Neutralizer: Defuses harsh oily specular highlights on forehead, nose, and cheeks.
@@ -1295,6 +1410,8 @@ async def apply_shine_neutralize_endpoint(
     img_rgb = np.array(pil_image)
     h, w, _ = img_rgb.shape
 
+    # Skin mask first (uploaded or cached segmentation): the upstream heal
+    # composite needs it to keep baseline sampling on real skin pixels.
     if skin_mask is not None:
         mask_bytes = await skin_mask.read()
         mask_pil = Image.open(io.BytesIO(mask_bytes))
@@ -1306,6 +1423,8 @@ async def apply_shine_neutralize_endpoint(
             mask_np = cv2.resize(mask_np, (w, h), interpolation=cv2.INTER_LINEAR)
     else:
         mask_np, _ = get_cached_skin_mask(img_rgb, feather_radius=feather_radius)
+
+    img_rgb = await apply_healed_base(img_rgb, blobs_json, heal_mode, texture_blend, grain_intensity, feather_radius, skin_mask=mask_np)
 
     rgba_patch = create_shine_neutralizer_rgba_patch(
         img_rgb=img_rgb,
