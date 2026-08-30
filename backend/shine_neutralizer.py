@@ -60,15 +60,25 @@ def neutralize_skin_shine(
     if np.sum(shine_mask > 0.1) < 10:
         return img_rgb.copy(), np.zeros((h, w), dtype=np.uint8)
 
+    # Extract high-frequency skin pore texture from surrounding healthy skin
+    img_f = img_rgb.astype(np.float32)
+    blurred_img = cv2.GaussianBlur(img_f, (7, 7), 0)
+    high_freq_texture = img_f - blurred_img
+
     # Soften the shine mask
     ksize = feather_radius * 2 + 1
     shine_soft = cv2.GaussianBlur(shine_mask, (ksize, ksize), 0)
 
-    # Blend shine pixels toward local matte skin tone
-    s_factor = (shine_soft * min(1.0, strength))[:, :, None]
+    # Retain 18% organic specular sheen so highlights look natural and alive (not dead/gray)
+    l_corrected_matte = l_matte + (l_chan - l_matte) * 0.18
+    matte_rgb = cv2.cvtColor(cv2.merge([l_corrected_matte, a_matte, b_matte]).astype(np.uint8), cv2.COLOR_LAB2RGB).astype(np.float32)
+    
+    # Inject healthy skin pore micro-texture into the matte zone
+    matte_textured = (matte_rgb + high_freq_texture * 0.65).clip(0, 255)
 
-    matte_rgb = cv2.cvtColor(cv2.merge([l_matte, a_matte, b_matte]).astype(np.uint8), cv2.COLOR_LAB2RGB).astype(np.float32)
-    composited = (img_rgb.astype(np.float32) * (1.0 - s_factor) + matte_rgb * s_factor).clip(0, 255).astype(np.uint8)
+    # Blend shine pixels toward textured matte tone
+    s_factor = (shine_soft * min(1.0, strength) * 0.88)[:, :, None]
+    composited = (img_f * (1.0 - s_factor) + matte_textured * s_factor).clip(0, 255).astype(np.uint8)
 
     patch_alpha = (shine_soft * min(1.0, strength) * 255.0).clip(0, 255).astype(np.uint8)
 
