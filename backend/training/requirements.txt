@@ -1,0 +1,2 @@
+# Training-only dependency. Keep it separate from the local plugin server.
+ultralytics>=8.3.0,<9.0.0
