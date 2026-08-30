@@ -70,15 +70,19 @@ def generate_dodge_and_burn_map(
     # Anatomical & Luminance Safety Clamping
     # -------------------------------------------------------------
     # Prevent over-dodging in natural deep structural shadows (under chin, nostril base)
-    shadow_protect = np.clip((l_chan - 35.0) / 35.0, 0.0, 1.0)
+    shadow_protect = np.clip((l_chan - 30.0) / 35.0, 0.0, 1.0)
     
     # Prevent over-burning in natural specular highlights (cheekbone apex)
-    highlight_protect = np.clip((240.0 - l_chan) / 30.0, 0.0, 1.0)
+    highlight_protect = np.clip((242.0 - l_chan) / 28.0, 0.0, 1.0)
+
+    # Edge Gradient Protection: protect anatomical lines (eyelids, lips, nostril creases)
+    grad_gray = cv2.morphologyEx(cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY), cv2.MORPH_GRADIENT, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
+    edge_protect = np.clip(1.0 - (grad_gray.astype(np.float32) / 45.0), 0.15, 1.0)
 
     # Scale correction by user strength and safety envelopes
-    strength_factor = max(0.0, min(1.0, strength)) * 0.60
+    strength_factor = max(0.0, min(1.0, strength)) * 0.65
     
-    correction = lum_diff * strength_factor * skin_binary * shadow_protect * highlight_protect
+    correction = lum_diff * strength_factor * skin_binary * shadow_protect * highlight_protect * edge_protect
 
     # Apply luminance adjustment
     l_corrected = (l_chan + correction).clip(0, 255)

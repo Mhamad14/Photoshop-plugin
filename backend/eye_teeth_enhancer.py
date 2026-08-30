@@ -122,18 +122,26 @@ def enhance_eyes_and_teeth(
         eye_lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
         l_eye, a_eye, b_eye = cv2.split(eye_lab)
 
-        # Sclera (whites) vs Iris separation
-        sclera_candidate = (eyes_mask > 0) & (l_eye > 130)
-        iris_candidate = (eyes_mask > 0) & ~sclera_candidate
+        # Adaptive Sclera vs Iris Separation:
+        eye_l_vals = l_eye[eyes_mask > 0]
+        if len(eye_l_vals) > 10:
+            adaptive_split = np.percentile(eye_l_vals, 55)
+            sclera_thresh = max(95.0, min(145.0, float(adaptive_split)))
+        else:
+            sclera_thresh = 125.0
+
+        # Sclera is bright with low chroma
+        sclera_candidate = (eyes_mask > 0) & (l_eye >= sclera_thresh)
+        iris_candidate = (eyes_mask > 0) & (l_eye < sclera_thresh)
 
         # 2a. Sclera Whitening (neutralize red veins without bleaching corner shadows)
-        if np.sum(sclera_candidate) > 15 and eye_brighten_strength > 0:
+        if np.sum(sclera_candidate) > 10 and eye_brighten_strength > 0:
             s_soft = cv2.GaussianBlur(sclera_candidate.astype(np.uint8) * 255, (3, 3), 0).astype(np.float32) / 255.0
             
             # Corner falloff: distance transform preserves natural shadows in eye corners
             dist_map = cv2.distanceTransform(sclera_candidate.astype(np.uint8), cv2.DIST_L2, 3)
             max_dist = np.max(dist_map) if np.max(dist_map) > 0 else 1.0
-            corner_falloff = np.clip(dist_map / (max_dist * 0.6 + 1e-5), 0.25, 1.0)
+            corner_falloff = np.clip(dist_map / (max_dist * 0.6 + 1e-5), 0.30, 1.0)
 
             s_weight = s_soft * corner_falloff
             s_strength = min(1.0, eye_brighten_strength)

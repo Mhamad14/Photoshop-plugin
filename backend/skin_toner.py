@@ -57,14 +57,26 @@ def calculate_tone_lift(
     # Scale factor based on strength and base skin tone
     # Darker skin tones get a rich luminous glow without chalkiness; lighter tones get porcelain clarity
     tone_scale = max(0.6, min(1.4, (255.0 - base_l) / 128.0))
-    lift_amount = strength * 38.0 * tone_scale * midtone_weight
+    lift_amount = strength * 34.0 * tone_scale * midtone_weight
 
     new_l = np.clip(l_chan + lift_amount, 0, 255)
 
-    # Subtle warmth preservation (slight boost to a* and b* so skin doesn't look washed out / gray)
-    subtle_warmth = strength * 2.0 * midtone_weight
-    new_a = np.clip(a_chan + subtle_warmth * 0.4, 0, 255)
-    new_b = np.clip(b_chan + subtle_warmth * 0.6, 0, 255)
+    # Tone-Adaptive Chroma Radiance (prevents ashy/chalky or jaundiced casts)
+    if base_l > 175:
+        # Fair/Porcelain skin: slight rose-alabaster warmth
+        chroma_a_boost = strength * 1.2 * midtone_weight
+        chroma_b_boost = strength * 0.6 * midtone_weight
+    elif base_l > 130:
+        # Medium/Olive skin: balanced golden radiance
+        chroma_a_boost = strength * 0.8 * midtone_weight
+        chroma_b_boost = strength * 1.4 * midtone_weight
+    else:
+        # Deep/Dark skin: rich warm bronze radiance
+        chroma_a_boost = strength * 1.5 * midtone_weight
+        chroma_b_boost = strength * 2.2 * midtone_weight
+
+    new_a = np.clip(a_chan + chroma_a_boost, 0, 255)
+    new_b = np.clip(b_chan + chroma_b_boost, 0, 255)
 
     merged_lab = cv2.merge([new_l, new_a, new_b]).astype(np.uint8)
     lightened_full_rgb = cv2.cvtColor(merged_lab, cv2.COLOR_LAB2RGB)
