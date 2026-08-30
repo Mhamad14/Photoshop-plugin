@@ -54,6 +54,36 @@ py -3.13 train_yolo_seg.py --epochs 120 --imgsz 1024 --device 0 --export-onnx
 
 For CPU-only experimentation, use `--device cpu`; training will be slow. An NVIDIA GPU with 8 GB+ VRAM is recommended.
 
+## ACNE04 Quick Start (already imported)
+
+The ACNE04-v2 dataset (1,204 images / 32,443 expert acne annotations, MICCAI 2024) is
+imported into `data/retouch_skin/`. To re-import or re-split:
+
+```powershell
+py -3.13 import_acne04.py            # requires _raw_acne04/ (annotations + JPEGImages)
+```
+
+Full training on CPU (no GPU on this machine) — recommended first run:
+
+```powershell
+cd backend\training
+py -3.13 train_yolo_seg.py --model yolov8n-seg.pt --epochs 60 --imgsz 640 --batch 16 --device cpu --name acne04_v1
+```
+
+Roughly 3-6 hours on an i7 CPU. When finished, deploy with:
+
+```powershell
+copy backend\training\runs\segment\runs\acne04_v1\weights\best.pt backend\models\retouch_yolov8_seg.pt
+```
+
+The server automatically uses the model at `backend/models/retouch_yolov8_seg.pt` as
+the primary detector (classical CV stays as fallback). No server code changes needed.
+Higher `sensitivity` in the panel lowers the YOLO confidence threshold.
+
+**License note:** ACNE04 is released for ACADEMIC USE ONLY (Wu et al., ICCV 2019).
+Fine for testing and learning; a commercial plugin needs the authors' permission or
+a commercially-licensed / self-collected dataset (e.g. via the panel's Training Mode).
+
 ## Acceptance Gate
 
 Do not call the model “photographer ready” based on mAP alone. Review its predictions with a retoucher across the locked test set:

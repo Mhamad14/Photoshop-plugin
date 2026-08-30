@@ -64,9 +64,18 @@ def main() -> int:
         train_options["device"] = args.device
 
     model.train(**train_options)
-    best = args.project / args.name / "weights" / "best.pt"
-    if not best.exists():
-        print(f"Training finished but {best} was not found.")
+
+    # Ultralytics nests the run under its own runs layout; locate best.pt robustly.
+    best = None
+    try:
+        best = Path(model.trainer.best)
+    except Exception:
+        best = None
+    if best is None or not best.exists():
+        candidates = sorted(args.project.glob("**/weights/best.pt"), key=lambda p: p.stat().st_mtime)
+        best = candidates[-1] if candidates else None
+    if best is None or not best.exists():
+        print("Training finished but best.pt was not found.")
         return 1
 
     metrics = YOLO(str(best)).val(data=str(args.data), imgsz=args.imgsz)
@@ -77,6 +86,7 @@ def main() -> int:
         print(f"ONNX export: {onnx_path}")
 
     print(f"Best checkpoint: {best}")
+    print("Deploy with: copy the checkpoint to backend/models/retouch_yolov8_seg.pt")
     return 0
 
 

@@ -11,6 +11,116 @@ from PIL import Image, ImageDraw
 
 logger = logging.getLogger("pimple_detector_v2")
 
+YOLO_MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "retouch_yolov8_seg.pt")
+_yolo_model = None
+_yolo_load_attempted = False
+
+
+def get_yolo_model():
+    """
+    Lazily loads the fine-tuned YOLO acne detector (backend/models/retouch_yolov8_seg.pt).
+    Returns None when unavailable so callers fall back to the classical CV pipeline.
+    """
+    global _yolo_model, _yolo_load_attempted
+    if _yolo_load_attempted:
+        return _yolo_model
+    _yolo_load_attempted = True
+    try:
+        if os.path.exists(YOLO_MODEL_PATH):
+            from ultralytics import YOLO
+            _yolo_model = YOLO(YOLO_MODEL_PATH)
+            logger.info("YOLO acne detector loaded from %s", YOLO_MODEL_PATH)
+        else:
+            logger.info("No YOLO detector at %s - using classical CV pipeline.", YOLO_MODEL_PATH)
+    except Exception as e:
+        logger.warning("YOLO detector load failed (%s) - using classical CV pipeline.", e)
+    return _yolo_model
+
+
+def detect_blobs_yolo(
+    model,
+    img_rgb: np.ndarray,
+    skin_binary: np.ndarray,
+    sensitivity: float = 0.5,
+    min_radius: int = 2,
+    max_radius: int = 25
+) -> List[Dict[str, Any]]:
+    """
+    Neural acne proposal stage: runs the fine-tuned YOLOv8 detector inside the
+    facial skin region and converts detections into the plugin's blob schema.
+    """
+    h, w, _ = img_rgb.shape
+
+    # Higher sensitivity -> lower confidence threshold.
+    conf_thr = max(0.12, min(0.55, 0.60 - sensitivity * 0.45))
+
+    bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    results = model.predict(bgr, conf=conf_thr, iou=0.45, imgsz=896, verbose=False)
+    if not results or results[0].boxes is None:
+        return []
+
+    r = results[0]
+    boxes = r.boxes
+
+    # Same skin margin erosion as the CV stage: keep detections off
+    # jawline/hairline boundaries.
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    skin_inner = cv2.erode(skin_binary, kernel)
+
+    blobs: List[Dict[str, Any]] = []
+    for i in range(len(boxes)):
+        box = boxes[i]
+        try:
+            cls = int(box.cls.tolist()[0])
+        except Exception:
+            continue
+        if cls != 0:  # only heal_blemish
+            continue
+        conf = float(box.conf.tolist()[0])
+        x1, y1, x2, y2 = [float(v) for v in box.xyxy.tolist()[0]]
+        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        radius = max(x2 - x1, y2 - y1) / 2.0
+
+        # Prefer the segmentation mask when the model provides one.
+        if r.masks is not None and i < len(r.masks):
+            try:
+                poly = r.masks[i].xy
+                if poly is not None and len(poly) >= 3:
+                    m = np.zeros((h, w), dtype=np.uint8)
+                    cv2.fillPoly(m, [np.asarray(poly, dtype=np.int32)], 255)
+                    ys, xs = np.nonzero(m)
+                    if len(xs) > 0:
+                        cx, cy = float(xs.mean()), float(ys.mean())
+                        radius = max(math.sqrt(len(xs) / math.pi), radius * 0.55)
+            except Exception:
+                pass
+
+        # Match the CV stage's heal coverage margin (+~30%).
+        radius = float(min(max(radius * 1.3, min_radius), max(max_radius, radius * 1.3)))
+
+        ix, iy = int(round(cx)), int(round(cy))
+        if ix < 0 or iy < 0 or ix >= w or iy >= h:
+            continue
+        if skin_inner[iy, ix] == 0:
+            continue
+
+        pad = max(3, int(radius * 0.35))
+        blobs.append({
+            "id": len(blobs) + 1,
+            "bbox": [max(0, int(cx - radius - pad)), max(0, int(cy - radius - pad)),
+                     min(w, int(cx + radius + pad)), min(h, int(cy + radius + pad))],
+            "centroid": [round(cx, 1), round(cy, 1)],
+            "radius": int(round(radius)),
+            "area": int(math.pi * radius * radius),
+            "confidence": round(min(0.99, max(0.4, conf)), 2),
+            "active": True,
+            "label": "pimple",
+            "source": "yolo"
+        })
+
+    logger.info("YOLO acne detector proposed %d blobs (conf>=%.2f).", len(blobs), conf_thr)
+    return blobs
+
 
 def estimate_clicked_blemish_radius(
     img_rgb: np.ndarray,
@@ -199,10 +309,27 @@ def detect_pimple_candidates(
     min_dim = float(min(h, w))
     min_radius = max(min_radius, int(min_dim * 0.0015))
     max_radius = max(max_radius, int(min_dim * 0.02))
-    
+
     if np.sum(skin_binary) < 100:
         logger.warning("Skin mask is nearly empty. Detection skipped.")
         return [], np.zeros((h, w), dtype=np.uint8)
+
+    # Stage 0: fine-tuned YOLO neural detector (when a trained model exists).
+    # Falls back to the classical CV pipeline on error or empty result.
+    yolo = get_yolo_model()
+    if yolo is not None:
+        try:
+            yolo_blobs = detect_blobs_yolo(
+                yolo, img_rgb, skin_binary,
+                sensitivity=sensitivity,
+                min_radius=min_radius,
+                max_radius=max_radius
+            )
+            if yolo_blobs:
+                return yolo_blobs, blobs_to_mask(yolo_blobs, (h, w))
+            logger.info("YOLO found no blemishes - falling back to CV proposal.")
+        except Exception as e:
+            logger.warning("YOLO detection error (%s) - falling back to CV proposal.", e)
 
     # Stage A: Multi-channel blemish energy with hair rejection
     spot_energy = compute_multi_channel_blemish_energy(img_rgb, skin_binary, sensitivity=sensitivity)

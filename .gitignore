@@ -21,5 +21,6 @@ temp/
 # Portrait datasets, trained weights, and Ultralytics experiment output
 backend/training/data/
 backend/training/runs/
+backend/training/_raw_acne04/
 backend/models/*.pt
 backend/models/*.onnx
