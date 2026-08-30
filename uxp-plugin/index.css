@@ -596,6 +596,41 @@ details[open] .chevron {
   border-color: var(--accent);
 }
 
+.training-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.training-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.training-row select {
+  min-width: 132px;
+  background-color: var(--bg-surface-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 10px;
+  padding: 4px 6px;
+}
+
+.training-content .secondary-btn {
+  width: 100%;
+}
+
+.control-hint {
+  color: var(--text-muted);
+  font-size: 9px;
+  line-height: 1.35;
+}
+
 /* ==========================================================================
    Feature Cards & Retouch Modules
    ========================================================================== */
@@ -903,4 +938,295 @@ input[type="range"]::-webkit-slider-thumb:hover {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* ==========================================================================
+   Modern Studio Pass
+   ========================================================================== */
+
+:root {
+  --bg-primary: #101114;
+  --bg-surface: #17191d;
+  --bg-surface-elevated: #20242a;
+  --bg-hover: #292e36;
+  --bg-active: #303742;
+  --border-subtle: #1d2025;
+  --border-default: #30353d;
+  --accent: #4f8cff;
+  --accent-hover: #6a9dff;
+  --accent-active: #326fdb;
+  --accent-subtle: rgba(79, 140, 255, 0.14);
+  --accent-text: #b8d0ff;
+  --text-primary: #f5f7fa;
+  --text-secondary: #aeb6c2;
+  --text-muted: #737d8b;
+  --radius-xs: 5px;
+  --radius-sm: 7px;
+  --radius-md: 10px;
+  --radius-lg: 13px;
+}
+
+body {
+  background: #101114;
+  font-size: 11px;
+}
+
+.panel-container {
+  padding: 12px;
+  gap: 12px;
+}
+
+.panel-header {
+  padding: 2px 1px 11px;
+  border-bottom-color: #272b31;
+}
+
+.brand {
+  gap: 10px;
+}
+
+.brand-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: var(--accent-subtle);
+  border-color: rgba(79, 140, 255, 0.45);
+  color: var(--accent-text);
+}
+
+.brand-text h1 {
+  font-size: 13px;
+  letter-spacing: 0;
+}
+
+.badge-v2 {
+  border-radius: 5px;
+  padding: 2px 5px;
+  font-size: 8px;
+}
+
+.version-tag {
+  margin-top: 2px;
+  font-size: 9px;
+}
+
+.status-badge {
+  min-height: 24px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #171a1f;
+}
+
+.panel-content {
+  gap: 10px;
+}
+
+.step-kicker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 1px 0 3px 2px;
+  color: var(--text-muted);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 1.1px;
+}
+
+.step-number {
+  color: var(--accent-text);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0;
+}
+
+.primary-btn {
+  min-height: 36px;
+  border-radius: 9px;
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 5px 18px rgba(43, 105, 225, 0.18);
+}
+
+.primary-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  box-shadow: 0 6px 22px rgba(43, 105, 225, 0.28);
+}
+
+.pulse-glow {
+  animation: none;
+}
+
+.primary-btn.execute-btn {
+  background: #1ca568;
+  border-color: #1ca568;
+  box-shadow: 0 5px 18px rgba(28, 165, 104, 0.16);
+}
+
+.preview-card {
+  padding: 10px;
+  gap: 9px;
+  border-radius: var(--radius-lg);
+  background: #191c21;
+  border-color: #343a43;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+}
+
+.preview-heading,
+.preview-subtitle {
+  display: block;
+}
+
+.preview-heading {
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.1px;
+}
+
+.preview-subtitle {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 400;
+}
+
+.preview-title {
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.preview-pill {
+  margin-top: 1px;
+  border-radius: 999px;
+  padding: 2px 7px;
+}
+
+.pill-badge {
+  margin-top: 1px;
+  border-radius: 999px;
+  padding: 2px 6px;
+}
+
+.canvas-wrapper {
+  min-height: 220px;
+  height: 250px;
+  border: 1px solid #303640;
+  border-radius: 8px;
+  background: #0b0d10;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
+}
+
+.preview-toolbar {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.tool-btn,
+.seg-btn,
+.mini-tag {
+  border-radius: 6px;
+}
+
+.tool-btn {
+  padding: 5px 8px;
+}
+
+.tool-btn.active {
+  background: var(--accent-subtle);
+}
+
+.seg-group {
+  margin-left: auto;
+  border-radius: 7px;
+}
+
+.seg-btn {
+  padding: 5px 8px;
+}
+
+.feature-card,
+.refine-drawer {
+  border-radius: var(--radius-md);
+  border-color: #2b3038;
+  background: #17191d;
+}
+
+.feature-card {
+  padding: 10px 11px;
+  gap: 9px;
+}
+
+.feature-header {
+  min-height: 19px;
+}
+
+.feature-name {
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.feature-tech {
+  color: #7f8a99;
+  font-size: 8px;
+}
+
+.feature-body {
+  gap: 9px;
+}
+
+.control-label {
+  color: #aeb6c2;
+}
+
+.val-badge {
+  color: #edf2f8;
+}
+
+input[type="range"] {
+  height: 4px;
+  background: #2a3038;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  width: 12px;
+  height: 12px;
+  background: #f3f6fb;
+  border: 2px solid var(--accent);
+}
+
+.drawer-title {
+  padding: 9px 11px;
+  font-weight: 600;
+  color: #c3cad4;
+}
+
+.training-drawer .drawer-title {
+  color: var(--accent-text);
+}
+
+.apply-section {
+  margin-top: 3px;
+}
+
+.apply-hint,
+.card-hint,
+.viewport-hint {
+  color: #7c8693;
+}
+
+.log-box {
+  min-height: 30px;
+  padding: 7px 10px;
+  border-radius: 8px;
+}
+
+.panel-footer {
+  padding-top: 9px;
+}
+
+@media (max-width: 340px) {
+  .panel-container { padding: 9px; }
+  .canvas-wrapper { height: 215px; min-height: 190px; }
+  .seg-btn { padding-left: 6px; padding-right: 6px; }
+  .tool-btn { padding-left: 6px; padding-right: 6px; }
 }

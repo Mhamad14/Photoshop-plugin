@@ -35,6 +35,12 @@ const chkShowSkin = document.getElementById("chk-show-skin");
 
 const inputPrompt = document.getElementById("input-prompt");
 const btnSendPrompt = document.getElementById("btn-send-prompt");
+const chkTrainingMode = document.getElementById("chk-training-mode");
+const selectTrainingLabel = document.getElementById("select-training-label");
+const selectTrainingSplit = document.getElementById("select-training-split");
+const chkTrainingConsent = document.getElementById("chk-training-consent");
+const btnExportTraining = document.getElementById("btn-export-training");
+const trainingStatus = document.getElementById("training-status");
 
 const chkEnableHeal = document.getElementById("chk-enable-heal");
 const chkPreserveMoles = document.getElementById("chk-preserve-moles");
@@ -476,7 +482,7 @@ function handleToolClick(origX, origY, px, py) {
     return;
   }
 
-  // Blemish tool: toggle nearest blob, or add a new one
+  // Blemish tool: toggle nearest blob, or add a new one.
   const scale = viewGeom ? viewGeom.scale : 1;
   let hitIndex = -1;
   let minDist = Infinity;
@@ -492,7 +498,17 @@ function handleToolClick(origX, origY, px, py) {
     }
   }
 
-  if (hitIndex !== -1) {
+  const trainingMode = chkTrainingMode.checked;
+  const trainingLabel = selectTrainingLabel.value;
+
+  if (trainingMode && hitIndex !== -1) {
+    const blob = currentBlobs[hitIndex];
+    blob.training_label = trainingLabel;
+    blob.active = trainingLabel === "heal_blemish" || trainingLabel === "tone_irregularity";
+    setLog(`Training label: spot #${blob.id} -> ${trainingLabel.replace("_", " ")}.`, "info");
+  } else if (trainingMode && trainingLabel === "exclude") {
+    setLog("Nothing added: Exclude is only for a detected false positive.", "info");
+  } else if (hitIndex !== -1) {
     currentBlobs[hitIndex].active = !currentBlobs[hitIndex].active;
     setLog(currentBlobs[hitIndex].active
       ? `Spot #${currentBlobs[hitIndex].id} will be removed.`
@@ -506,11 +522,14 @@ function handleToolClick(origX, origY, px, py) {
       bbox: [Math.max(0, origX - radius), Math.max(0, origY - radius), Math.min(imgW, origX + radius), Math.min(imgH, origY + radius)],
       radius: radius,
       confidence: 1.0,
-      active: true,
-      label: "pimple",
+      active: !trainingMode || trainingLabel === "heal_blemish" || trainingLabel === "tone_irregularity",
+      label: trainingMode ? trainingLabel : "pimple",
+      training_label: trainingMode ? trainingLabel : undefined,
       source: "manual_click"
     });
-    setLog(`Missed spot added at (${origX}, ${origY}).`, "success");
+    setLog(trainingMode
+      ? `Training annotation added at (${origX}, ${origY}): ${trainingLabel.replace("_", " ")}.`
+      : `Missed spot added at (${origX}, ${origY}).`, "success");
   }
 
   renderCanvas();
@@ -1034,6 +1053,54 @@ btnSendPrompt.addEventListener("click", async () => {
     setLog(err.message, "error");
   } finally {
     btnSendPrompt.disabled = false;
+  }
+});
+
+/* ============================== REVIEWED TRAINING EXPORT ============================== */
+btnExportTraining.addEventListener("click", async () => {
+  if (!currentPortraitBlob) {
+    trainingStatus.textContent = "Analyze a portrait before exporting a training sample.";
+    setLog("Analyze a portrait before saving training data.", "warning");
+    return;
+  }
+  if (!chkTrainingConsent.checked) {
+    trainingStatus.textContent = "Permission confirmation is required before export.";
+    setLog("Confirm permission to use this portrait for training.", "warning");
+    return;
+  }
+  if (!isServerOnline) {
+    await checkServerStatus();
+    if (!isServerOnline) {
+      trainingStatus.textContent = "AI server is offline.";
+      setLog("AI backend offline. Start backend\\run_server.bat first.", "error");
+      return;
+    }
+  }
+
+  btnExportTraining.disabled = true;
+  trainingStatus.textContent = "Saving reviewed image and YOLO polygons\u2026";
+  try {
+    const formData = new FormData();
+    formData.append("image", currentPortraitBlob, "reviewed_portrait.png");
+    formData.append("blobs_json", JSON.stringify(currentBlobs));
+    formData.append("split", selectTrainingSplit.value);
+    formData.append("reviewed", "true");
+
+    const res = await fetch(`${getServerUrl()}/training/export`, {
+      method: "POST",
+      body: formData
+    });
+    if (!res.ok) throw new Error(`Training export failed: ${await res.text()}`);
+
+    const data = await res.json();
+    trainingStatus.textContent = `Saved ${data.labels} reviewed labels to ${data.split}.`;
+    setLog(`Training sample saved (${data.labels} labels).`, "success");
+  } catch (err) {
+    console.error("Training export error:", err);
+    trainingStatus.textContent = err.message;
+    setLog(err.message, "error");
+  } finally {
+    btnExportTraining.disabled = false;
   }
 });
 
