@@ -1,0 +1,11 @@
+# YOLOv8 segmentation dataset for portrait retouching.
+# Put images and matching YOLO polygon labels under backend/training/data/retouch_skin/.
+path: data/retouch_skin
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: heal_blemish
+  1: tone_irregularity
+  2: preserve_mark

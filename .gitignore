@@ -17,3 +17,9 @@ venv/
 # Temporary and test artifacts
 *.tmp
 temp/
+
+# Portrait datasets, trained weights, and Ultralytics experiment output
+backend/training/data/
+backend/training/runs/
+backend/models/*.pt
+backend/models/*.onnx

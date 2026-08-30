@@ -677,6 +677,142 @@ async function placePatchAsLayer(pngBuffer, fileName, layerName) {
   }, { commandName: `Place ${layerName}` });
 }
 
+function createSkinAlphaMaskBlob() {
+  if (!currentSkinMaskImage) return null;
+
+  const maskCanvas = document.createElement("canvas");
+  const width = currentSkinMaskImage.naturalWidth || currentSkinMaskImage.width;
+  const height = currentSkinMaskImage.naturalHeight || currentSkinMaskImage.height;
+  maskCanvas.width = width;
+  maskCanvas.height = height;
+  const ctx = maskCanvas.getContext("2d");
+  ctx.drawImage(currentSkinMaskImage, 0, 0, width, height);
+
+  // Photoshop can load a placed layer's transparency as a selection. Convert
+  // the grayscale segmentation mask into white pixels with mask alpha.
+  const pixels = ctx.getImageData(0, 0, width, height);
+  for (let i = 0; i < pixels.data.length; i += 4) {
+    const alpha = pixels.data[i];
+    pixels.data[i] = 255;
+    pixels.data[i + 1] = 255;
+    pixels.data[i + 2] = 255;
+    pixels.data[i + 3] = alpha;
+  }
+  ctx.putImageData(pixels, 0, 0);
+  return dataUrlToBlob(maskCanvas.toDataURL("image/png"));
+}
+
+async function loadSkinSelection(targetLayerName = null) {
+  const maskBlob = createSkinAlphaMaskBlob();
+  if (!maskBlob) throw new Error("Analyze Portrait first so Photoshop can build the skin mask.");
+
+  const tempFolder = await localFileSystem.getTemporaryFolder();
+  const maskFile = await tempFolder.createFile("ai_skin_selection.png", { overwrite: true });
+  await maskFile.write(await maskBlob.arrayBuffer(), { format: uxp.storage.formats.binary });
+  const maskToken = localFileSystem.createSessionToken(maskFile);
+
+  await core.executeAsModal(async () => {
+    const commands = [
+      {
+        _obj: "placeEvent",
+        target: { _path: maskToken, _kind: "local" },
+        _options: { dialogOptions: "dontDisplay" }
+      },
+      {
+        _obj: "set",
+        _target: [{ _ref: "channel", _property: "selection" }],
+        to: { _ref: "channel", _enum: "channel", _value: "transparencyEnum" },
+        _options: { dialogOptions: "dontDisplay" }
+      },
+      {
+        _obj: "delete",
+        _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }],
+        _options: { dialogOptions: "dontDisplay" }
+      }
+    ];
+    if (targetLayerName) {
+      commands.push({
+        _obj: "select",
+        _target: [{ _ref: "layer", _enum: "name", _value: targetLayerName }],
+        makeVisible: false,
+        _options: { dialogOptions: "dontDisplay" }
+      });
+    }
+    await action.batchPlay(commands, {});
+  }, { commandName: "Load AI Skin Mask" });
+}
+
+async function attachSkinLayerMask(layerName) {
+  await loadSkinSelection(layerName);
+  await core.executeAsModal(async () => {
+    await action.batchPlay([
+      {
+        _obj: "make",
+        new: { _class: "channel" },
+        at: { _ref: "channel", _enum: "channel", _value: "mask" },
+        using: { _enum: "userMaskEnabled", _value: "revealSelection" },
+        _options: { dialogOptions: "dontDisplay" }
+      },
+      {
+        _obj: "set",
+        _target: [{ _ref: "channel", _property: "selection" }],
+        to: { _enum: "ordinal", _value: "none" },
+        _options: { dialogOptions: "dontDisplay" }
+      }
+    ], {});
+  }, { commandName: `Mask ${layerName}` });
+}
+
+function buildToneLiftCurve() {
+  const baseL = Math.max(20, Math.min(235, Number(sampledBaseTone.lab[0]) || 160));
+  const strength = parseInt(sliderStrength.value, 10) / 100;
+  const toneScale = Math.max(0.6, Math.min(1.4, (255 - baseL) / 128));
+  const lift = Math.round(strength * 38 * toneScale);
+  const points = [
+    [0, 0],
+    [64, Math.min(255, 64 + Math.round(lift * 0.55))],
+    [baseL, Math.min(255, baseL + lift)],
+    [192, Math.min(255, 192 + Math.round(lift * 0.35))],
+    [255, 255]
+  ].sort((a, b) => a[0] - b[0]);
+
+  return points.filter((point, index) => index === 0 || point[0] !== points[index - 1][0])
+    .map(([horizontal, vertical]) => ({ _obj: "paint", horizontal, vertical }));
+}
+
+async function createMaskedToneLiftLayer() {
+  await loadSkinSelection();
+  const curve = buildToneLiftCurve();
+
+  await core.executeAsModal(async () => {
+    await action.batchPlay([
+      {
+        _obj: "make",
+        _target: [{ _ref: "adjustmentLayer" }],
+        using: {
+          _obj: "adjustmentLayer",
+          name: "AI Skin Tone Lift",
+          type: {
+            _obj: "curves",
+            adjustment: [{
+              _obj: "curvesAdjustment",
+              channel: { _ref: "channel", _enum: "channel", _value: "composite" },
+              curve
+            }]
+          }
+        },
+        _options: { dialogOptions: "dontDisplay" }
+      },
+      {
+        _obj: "set",
+        _target: [{ _ref: "channel", _property: "selection" }],
+        to: { _enum: "ordinal", _value: "none" },
+        _options: { dialogOptions: "dontDisplay" }
+      }
+    ], {});
+  }, { commandName: "Create AI Skin Tone Lift" });
+}
+
 async function groupRetouchLayers(groupName, layerNames) {
   if (!layerNames || layerNames.length < 2) return;
   await core.executeAsModal(async () => {
@@ -996,27 +1132,16 @@ btnApplyAll.addEventListener("click", async () => {
 
       const smoothBuffer = await (await smoothRes.blob()).arrayBuffer();
       await placePatchAsLayer(smoothBuffer, "smoothed_layer.png", "AI Smoothed Skin");
+      await attachSkinLayerMask("AI Smoothed Skin");
       placedNames.push("AI Smoothed Skin");
     }
 
-    /* ACTION 4: Lighten Skin */
+    /* ACTION 4: Native Photoshop Curves adjustment, masked to detected skin. */
     if (doLighten) {
-      applyBtnText.textContent = "Placing tone lift layer\u2026";
-      setLog("Computing tone-relative lightening\u2026", "info");
-
-      const lightenForm = new FormData();
-      lightenForm.append("image", portraitBlob, "portrait.png");
-      lightenForm.append("strength", (parseInt(sliderStrength.value, 10) / 100).toString());
-      lightenForm.append("base_tone_lab", JSON.stringify(sampledBaseTone.lab));
-      lightenForm.append("feather_radius", sliderFeather.value);
-      if (currentSkinMaskBlob) lightenForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
-
-      const lightenRes = await fetch(`${getServerUrl()}/apply-lighten`, { method: "POST", body: lightenForm });
-      if (!lightenRes.ok) throw new Error(`Lightening failed: ${await lightenRes.text()}`);
-
-      const lightenBuffer = await (await lightenRes.blob()).arrayBuffer();
-      await placePatchAsLayer(lightenBuffer, "lightened_layer.png", "AI Lightened Skin");
-      placedNames.push("AI Lightened Skin");
+      applyBtnText.textContent = "Creating native Curves layer\u2026";
+      setLog("Creating an editable, skin-masked Curves adjustment\u2026", "info");
+      await createMaskedToneLiftLayer();
+      placedNames.push("AI Skin Tone Lift");
     }
 
     /* ACTION 5: AI Eyes & Teeth Enhancer */
@@ -1053,6 +1178,7 @@ btnApplyAll.addEventListener("click", async () => {
       if (shineRes.ok) {
         const shineBuffer = await (await shineRes.blob()).arrayBuffer();
         await placePatchAsLayer(shineBuffer, "anti_shine_layer.png", "AI Anti-Glare Shine");
+        await attachSkinLayerMask("AI Anti-Glare Shine");
         placedNames.push("AI Anti-Glare Shine");
       }
     }
