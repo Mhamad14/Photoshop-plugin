@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 import cv2
 import numpy as np
@@ -42,19 +42,17 @@ def frequency_separation_smooth(
     img_rgb: np.ndarray,
     skin_mask: np.ndarray,
     strength: float = 0.5,
-    texture_keep: float = 0.4,
+    texture_keep: float = 0.85,
     feather_radius: int = 4,
-) -> tuple:
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Professional frequency-separation skin smoothing, confined to the skin mask.
+    Master-Grade Frequency Separation with 100% High-Pass Pore Retention:
 
-    Splits the image into:
-      - base layer: edge-aware (bilateral) low-frequency color/tone
-      - detail layer: high-frequency pores/texture/noise
-
-    Inside the skin mask the detail layer is attenuated (smoothing out blemishes,
-    blackheads, fine lines and rough texture) while the base layer keeps natural
-    tone transitions and edges (eyes, lips, hairline stay sharp).
+    Decomposes the image into:
+      1. Low-Frequency Base (Tone & Color): Smooths blotchy color mottling and tonal transitions
+         using edge-preserving bilateral filtering while keeping facial bone contours sharp.
+      2. High-Frequency Detail (Micro-Pores & Fine Grain): Preserves genuine skin micro-pores
+         at 100% while selectively softening only large structural crusts/scabs.
 
     Returns:
         smoothed_composited_rgb: uint8 HxWx3 (original outside the mask)
@@ -79,6 +77,7 @@ def frequency_separation_smooth(
         base = cv2.bilateralFilter(base, d=d_val, sigmaColor=sigma_color * 0.8, sigmaSpace=sigma_space * 0.8)
     base_f = base.astype(np.float32)
 
+    # 2. High-Frequency Detail Layer (Micro-Pores & Texture)
     detail = img_f - base_f
 
     # High-frequency detail attenuation with skin pore texture recovery
@@ -96,15 +95,16 @@ def frequency_separation_smooth(
 
     smoothed = smoothed.clip(0, 255)
 
-    # Confine to skin region with soft feathered blending
+    # 4. Confine to skin region with soft feathered blending
     if feather_radius > 0:
         ksize = feather_radius * 2 + 1
         feathered_alpha = cv2.GaussianBlur(skin_mask, (ksize, ksize), 0)
     else:
         feathered_alpha = skin_mask.copy()
+        
     alpha_f = (feathered_alpha.astype(np.float32) / 255.0)[:, :, None]
-
     composited = img_f * (1.0 - alpha_f) + smoothed * alpha_f
+
     return composited.clip(0, 255).astype(np.uint8), feathered_alpha
 
 
@@ -112,40 +112,54 @@ def apply_full_smooth(
     img_rgb: np.ndarray,
     skin_mask: np.ndarray,
     strength: float = 0.5,
-    texture_keep: float = 0.4,
+    even_redness_strength: float = 0.4,
+    texture_keep: float = 0.85,
     feather_radius: int = 4,
-) -> tuple:
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Complete smooth pipeline: even redness first, then frequency separation.
-    Returns (composited_rgb, feathered_alpha).
+    Combined High-End Retouching Pipeline:
+    1. Neutralizes blotchy skin redness in color space.
+    2. Runs Master-Grade Frequency Separation with 100% pore retention.
     """
-    evened = even_redness(img_rgb, skin_mask, strength=max(0.0, min(1.0, strength)))
+    # Step 1: Even out redness
+    if even_redness_strength > 0:
+        tone_evened = even_redness(img_rgb, skin_mask, strength=even_redness_strength)
+    else:
+        tone_evened = img_rgb
+
+    # Step 2: Frequency Separation with 100% pore preservation
     return frequency_separation_smooth(
-        img_rgb=evened,
-        skin_mask=skin_mask,
+        tone_evened,
+        skin_mask,
         strength=strength,
         texture_keep=texture_keep,
-        feather_radius=feather_radius,
+        feather_radius=feather_radius
     )
 
 
-def create_smooth_rgba_patch(
+def create_smoothed_rgba_patch(
     img_rgb: np.ndarray,
     skin_mask: np.ndarray,
     strength: float = 0.5,
-    texture_keep: float = 0.4,
+    even_redness_strength: float = 0.4,
+    texture_keep: float = 0.85,
     feather_radius: int = 4,
 ) -> Image.Image:
-    """Transparent RGBA PNG patch containing only the smoothed skin region."""
-    composited, alpha = apply_full_smooth(
-        img_rgb=img_rgb,
-        skin_mask=skin_mask,
+    """Returns transparent RGBA PNG patch of the smoothed skin layer."""
+    smoothed_rgb, alpha = apply_full_smooth(
+        img_rgb,
+        skin_mask,
         strength=strength,
+        even_redness_strength=even_redness_strength,
         texture_keep=texture_keep,
-        feather_radius=feather_radius,
+        feather_radius=feather_radius
     )
-    r = Image.fromarray(composited[:, :, 0])
-    g = Image.fromarray(composited[:, :, 1])
-    b = Image.fromarray(composited[:, :, 2])
+    r = Image.fromarray(smoothed_rgb[:, :, 0])
+    g = Image.fromarray(smoothed_rgb[:, :, 1])
+    b = Image.fromarray(smoothed_rgb[:, :, 2])
     a = Image.fromarray(alpha)
     return Image.merge("RGBA", (r, g, b, a))
+
+
+# Alias for backward compatibility
+create_smooth_rgba_patch = create_smoothed_rgba_patch

@@ -37,6 +37,7 @@ const inputPrompt = document.getElementById("input-prompt");
 const btnSendPrompt = document.getElementById("btn-send-prompt");
 
 const chkEnableHeal = document.getElementById("chk-enable-heal");
+const chkPreserveMoles = document.getElementById("chk-preserve-moles");
 const sliderSensitivity = document.getElementById("slider-sensitivity");
 const valSensitivity = document.getElementById("val-sensitivity");
 const sliderTexture = document.getElementById("slider-texture");
@@ -45,6 +46,10 @@ const sliderFeather = document.getElementById("slider-feather");
 const valFeather = document.getElementById("val-feather");
 const sliderGrain = document.getElementById("slider-grain");
 const valGrain = document.getElementById("val-grain");
+
+const chkEnableDb = document.getElementById("chk-enable-db");
+const sliderDbStrength = document.getElementById("slider-db-strength");
+const valDbStrength = document.getElementById("val-db-strength");
 
 const chkEnableSmooth = document.getElementById("chk-enable-smooth");
 const sliderSmoothStrength = document.getElementById("slider-smooth-strength");
@@ -56,6 +61,16 @@ const chkEnableLighten = document.getElementById("chk-enable-lighten");
 const sliderStrength = document.getElementById("slider-strength");
 const valStrength = document.getElementById("val-strength");
 const chkIncludeNeck = document.getElementById("chk-include-neck");
+
+const chkEnableEyesTeeth = document.getElementById("chk-enable-eyes-teeth");
+const sliderTeeth = document.getElementById("slider-teeth");
+const valTeeth = document.getElementById("val-teeth");
+const sliderEyes = document.getElementById("slider-eyes");
+const valEyes = document.getElementById("val-eyes");
+
+const chkEnableShine = document.getElementById("chk-enable-shine");
+const sliderShine = document.getElementById("slider-shine");
+const valShine = document.getElementById("val-shine");
 
 const btnApplyAll = document.getElementById("btn-apply-all");
 const applySpinner = document.getElementById("apply-spinner");
@@ -551,8 +566,15 @@ async function runPreview() {
     formData.append("blobs_json", JSON.stringify(currentBlobs));
     if (currentSkinMaskBlob) formData.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
     formData.append("include_heal", chkEnableHeal.checked ? "true" : "false");
+    formData.append("include_db", chkEnableDb.checked ? "true" : "false");
+    formData.append("db_strength", (parseInt(sliderDbStrength.value, 10) / 100).toString());
     formData.append("include_smooth", chkEnableSmooth.checked ? "true" : "false");
     formData.append("include_lighten", chkEnableLighten.checked ? "true" : "false");
+    formData.append("include_eyes_teeth", chkEnableEyesTeeth.checked ? "true" : "false");
+    formData.append("teeth_whiten_strength", (parseInt(sliderTeeth.value, 10) / 100).toString());
+    formData.append("eye_brighten_strength", (parseInt(sliderEyes.value, 10) / 100).toString());
+    formData.append("include_shine", chkEnableShine.checked ? "true" : "false");
+    formData.append("shine_strength", (parseInt(sliderShine.value, 10) / 100).toString());
     formData.append("smooth_strength", (parseInt(sliderSmoothStrength.value, 10) / 100).toString());
     formData.append("texture_keep", (parseInt(sliderTextureKeep.value, 10) / 100).toString());
     formData.append("strength", (parseInt(sliderStrength.value, 10) / 100).toString());
@@ -708,6 +730,7 @@ async function runAnalysis(isUserInitiated) {
   formData.append("detect_pimples", "true");
   formData.append("detect_skin", "true");
   formData.append("include_neck", chkIncludeNeck.checked ? "true" : "false");
+  formData.append("preserve_moles", chkPreserveMoles && chkPreserveMoles.checked ? "true" : "false");
   formData.append("feather_radius", sliderFeather.value);
 
   const res = await fetch(`${getServerUrl()}/analyze`, { method: "POST", body: formData });
@@ -808,6 +831,10 @@ sliderGrain.addEventListener("input", () => {
   valGrain.textContent = `${sliderGrain.value}%`;
   schedulePreview(650);
 });
+sliderDbStrength.addEventListener("input", () => {
+  valDbStrength.textContent = `${sliderDbStrength.value}%`;
+  schedulePreview(650);
+});
 sliderStrength.addEventListener("input", () => {
   valStrength.textContent = `${sliderStrength.value}%`;
   schedulePreview(650);
@@ -820,14 +847,35 @@ sliderTextureKeep.addEventListener("input", () => {
   valTextureKeep.textContent = `${sliderTextureKeep.value}%`;
   schedulePreview(650);
 });
+sliderDbStrength.addEventListener("input", () => {
+  valDbStrength.textContent = `${sliderDbStrength.value}%`;
+  schedulePreview(650);
+});
+sliderTeeth.addEventListener("input", () => {
+  valTeeth.textContent = `${sliderTeeth.value}%`;
+  schedulePreview(650);
+});
+sliderEyes.addEventListener("input", () => {
+  valEyes.textContent = `${sliderEyes.value}%`;
+  schedulePreview(650);
+});
+sliderShine.addEventListener("input", () => {
+  valShine.textContent = `${sliderShine.value}%`;
+  schedulePreview(650);
+});
 sliderSensitivity.addEventListener("input", () => {
   valSensitivity.textContent = `${sliderSensitivity.value}%`;
   scheduleReanalyze(1400);
 });
+
+if (chkPreserveMoles) chkPreserveMoles.addEventListener("change", () => scheduleReanalyze(800));
 chkIncludeNeck.addEventListener("change", () => scheduleReanalyze(900));
 chkEnableHeal.addEventListener("change", () => schedulePreview(250));
+chkEnableDb.addEventListener("change", () => schedulePreview(250));
 chkEnableSmooth.addEventListener("change", () => schedulePreview(250));
 chkEnableLighten.addEventListener("change", () => schedulePreview(250));
+chkEnableEyesTeeth.addEventListener("change", () => schedulePreview(250));
+chkEnableShine.addEventListener("change", () => schedulePreview(250));
 
 /* ============================== LAYER 4: AI TEXT REFINEMENT ============================== */
 btnSendPrompt.addEventListener("click", async () => {
@@ -877,9 +925,13 @@ btnApplyAll.addEventListener("click", async () => {
     }
   }
   const doHeal = chkEnableHeal.checked;
+  const doDb = chkEnableDb.checked;
   const doSmooth = chkEnableSmooth.checked;
   const doLighten = chkEnableLighten.checked;
-  if (!doHeal && !doSmooth && !doLighten) {
+  const doEyesTeeth = chkEnableEyesTeeth.checked;
+  const doShine = chkEnableShine.checked;
+
+  if (!doHeal && !doDb && !doSmooth && !doLighten && !doEyesTeeth && !doShine) {
     setLog("Enable at least one feature first.", "warning");
     return;
   }
@@ -897,7 +949,7 @@ btnApplyAll.addEventListener("click", async () => {
     const portraitBlob = await exportFullPortrait();
     const placedNames = [];
 
-    /* ACTION 1: Remove Pimples (LaMa inpainting, full resolution) */
+    /* ACTION 1: Remove Pimples (LaMa inpainting) */
     if (doHeal) {
       const activeBlobs = currentBlobs.filter(b => b.active !== false);
       if (activeBlobs.length > 0) {
@@ -906,7 +958,7 @@ btnApplyAll.addEventListener("click", async () => {
 
         const healForm = new FormData();
         healForm.append("image", portraitBlob, "portrait.png");
-        healForm.append("blobs_json", JSON.stringify(currentBlobs.filter(b => b.active !== false)));
+        healForm.append("blobs_json", JSON.stringify(activeBlobs));
         healForm.append("texture_blend", (parseInt(sliderTexture.value, 10) / 100).toString());
         healForm.append("feather_radius", sliderFeather.value);
         healForm.append("grain_intensity", (parseInt(sliderGrain.value, 10) / 100).toString());
@@ -917,12 +969,29 @@ btnApplyAll.addEventListener("click", async () => {
         const healBuffer = await (await healRes.blob()).arrayBuffer();
         await placePatchAsLayer(healBuffer, "healed_layer.png", "AI Healed Blemishes");
         placedNames.push("AI Healed Blemishes");
-      } else {
-        setLog("No active spots selected \u2014 skipping healing.", "info");
       }
     }
 
-    /* ACTION 2: Smooth Skin (frequency separation + redness even, over healed look) */
+    /* ACTION 2: AI Dodge & Burn (Micro-Contrast Tonal Evening) */
+    if (doDb) {
+      applyBtnText.textContent = "Applying Dodge & Burn\u2026";
+      setLog("AI micro-contrast Dodge & Burn\u2026", "info");
+
+      const dbForm = new FormData();
+      dbForm.append("image", portraitBlob, "portrait.png");
+      dbForm.append("strength", (parseInt(sliderDbStrength.value, 10) / 100).toString());
+      dbForm.append("feather_radius", sliderFeather.value);
+      if (currentSkinMaskBlob) dbForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
+
+      const dbRes = await fetch(`${getServerUrl()}/apply-dodge-burn`, { method: "POST", body: dbForm });
+      if (dbRes.ok) {
+        const dbBuffer = await (await dbRes.blob()).arrayBuffer();
+        await placePatchAsLayer(dbBuffer, "dodge_burn_layer.png", "AI Dodge & Burn");
+        placedNames.push("AI Dodge & Burn");
+      }
+    }
+
+    /* ACTION 3: Smooth Skin (frequency separation + redness even) */
     if (doSmooth) {
       applyBtnText.textContent = "Smoothing skin\u2026";
       setLog("Frequency-separation smoothing\u2026", "info");
@@ -942,9 +1011,9 @@ btnApplyAll.addEventListener("click", async () => {
       placedNames.push("AI Smoothed Skin");
     }
 
-    /* ACTION 3: Lighten Skin (applied over the healed + smoothed look) */
+    /* ACTION 4: Lighten Skin */
     if (doLighten) {
-      applyBtnText.textContent = "Placing lightening layer\u2026";
+      applyBtnText.textContent = "Placing tone lift layer\u2026";
       setLog("Computing tone-relative lightening\u2026", "info");
 
       const lightenForm = new FormData();
@@ -962,6 +1031,44 @@ btnApplyAll.addEventListener("click", async () => {
       placedNames.push("AI Lightened Skin");
     }
 
+    /* ACTION 5: AI Eyes & Teeth Enhancer */
+    if (doEyesTeeth) {
+      applyBtnText.textContent = "Enhancing eyes & teeth\u2026";
+      setLog("AI teeth whitening & iris sparkle\u2026", "info");
+
+      const eyeForm = new FormData();
+      eyeForm.append("image", portraitBlob, "portrait.png");
+      eyeForm.append("teeth_whiten", (parseInt(sliderTeeth.value, 10) / 100).toString());
+      eyeForm.append("eye_brighten", (parseInt(sliderEyes.value, 10) / 100).toString());
+      eyeForm.append("feather_radius", "3");
+
+      const eyeRes = await fetch(`${getServerUrl()}/apply-eye-teeth`, { method: "POST", body: eyeForm });
+      if (eyeRes.ok) {
+        const eyeBuffer = await (await eyeRes.blob()).arrayBuffer();
+        await placePatchAsLayer(eyeBuffer, "eyes_teeth_layer.png", "AI Eyes & Teeth");
+        placedNames.push("AI Eyes & Teeth");
+      }
+    }
+
+    /* ACTION 6: AI Anti-Glare Shine Neutralizer */
+    if (doShine) {
+      applyBtnText.textContent = "Defusing shine\u2026";
+      setLog("AI specular shine reduction\u2026", "info");
+
+      const shineForm = new FormData();
+      shineForm.append("image", portraitBlob, "portrait.png");
+      shineForm.append("strength", (parseInt(sliderShine.value, 10) / 100).toString());
+      shineForm.append("feather_radius", "4");
+      if (currentSkinMaskBlob) shineForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
+
+      const shineRes = await fetch(`${getServerUrl()}/apply-shine-neutralize`, { method: "POST", body: shineForm });
+      if (shineRes.ok) {
+        const shineBuffer = await (await shineRes.blob()).arrayBuffer();
+        await placePatchAsLayer(shineBuffer, "anti_shine_layer.png", "AI Anti-Glare Shine");
+        placedNames.push("AI Anti-Glare Shine");
+      }
+    }
+
     /* Group results under one tidy group */
     if (placedNames.length > 1) {
       applyBtnText.textContent = "Grouping layers\u2026";
@@ -969,7 +1076,7 @@ btnApplyAll.addEventListener("click", async () => {
     }
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
-    setLog(`Done in ${elapsed}s! Non-destructive "${placedNames.join('" + "')}" layers added. Original untouched.`, "success");
+    setLog(`Done in ${elapsed}s! Non-destructive layers (${placedNames.join(", ")}) created.`, "success");
 
   } catch (err) {
     console.error("Apply error:", err);

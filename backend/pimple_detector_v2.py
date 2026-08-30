@@ -12,22 +12,161 @@ from PIL import Image, ImageDraw
 logger = logging.getLogger("pimple_detector_v2")
 
 
-def compute_local_stats(signal: np.ndarray, mask: np.ndarray, win_size: int) -> Tuple[np.ndarray, np.ndarray]:
+def estimate_clicked_blemish_radius(
+    img_rgb: np.ndarray,
+    cx: int,
+    cy: int,
+    min_r: int = 3,
+    max_r: int = 24,
+    default_r: int = 8
+) -> int:
     """
-    Computes spatially local mean and standard deviation over masked skin area.
+    Intelligent Click-to-Heal Auto-Radius Estimator:
+    
+    When a user clicks a point on the canvas, this function measures the radial color/gradient
+    inflection from (cx, cy) outward along 8 compass rays to dynamically fit the exact diameter
+    of the clicked blemish without requiring manual slider adjustment.
     """
-    win_size = win_size | 1  # ensure odd
-    mask_f = (mask > 0).astype(np.float32)
+    h, w, _ = img_rgb.shape
+    if cx < 0 or cy < 0 or cx >= w or cy >= h:
+        return default_r
+
+    half = 24
+    x1, y1 = max(0, cx - half), max(0, cy - half)
+    x2, y2 = min(w, cx + half + 1), min(h, cy + half + 1)
     
-    blurred_signal = cv2.GaussianBlur(signal * mask_f, (win_size, win_size), 0)
-    norm_w = cv2.GaussianBlur(mask_f, (win_size, win_size), 0) + 1e-5
-    local_mean = blurred_signal / norm_w
+    patch_rgb = img_rgb[y1:y2, x1:x2]
+    if patch_rgb.size == 0 or patch_rgb.shape[0] < 7 or patch_rgb.shape[1] < 7:
+        return default_r
+
+    patch_lab = cv2.cvtColor(patch_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    center_px = patch_lab[cy - y1, cx - x1]
+
+    delta_e = np.sqrt(np.sum((patch_lab - center_px) ** 2, axis=2))
     
-    sq_signal = cv2.GaussianBlur((signal ** 2) * mask_f, (win_size, win_size), 0)
-    local_var = np.maximum(0, (sq_signal / norm_w) - (local_mean ** 2))
-    local_std = np.sqrt(local_var)
+    angles = [0, 45, 90, 135, 180, 225, 270, 315]
+    detected_radii = []
     
-    return local_mean, local_std
+    for ang in angles:
+        rad = math.radians(ang)
+        dx = math.cos(rad)
+        dy = math.sin(rad)
+        
+        last_diff = 0.0
+        found_r = default_r
+        for step in range(2, half - 1):
+            px = int(round((cx - x1) + dx * step))
+            py = int(round((cy - y1) + dy * step))
+            if px < 0 or py < 0 or px >= patch_rgb.shape[1] or py >= patch_rgb.shape[0]:
+                break
+                
+            cur_diff = delta_e[py, px]
+            if step >= 3 and cur_diff > 14.0 and (cur_diff - last_diff) < 1.0:
+                found_r = step
+                break
+            last_diff = cur_diff
+            
+        detected_radii.append(found_r)
+
+    if detected_radii:
+        estimated_r = int(np.percentile(detected_radii, 75)) + 2
+        return max(min_r, min(max_r, estimated_r))
+    
+    return default_r
+
+
+def compute_multi_channel_blemish_energy(
+    img_rgb: np.ndarray,
+    skin_binary: np.ndarray,
+    sensitivity: float = 0.5
+) -> np.ndarray:
+    """
+    Multi-Channel Dermatological Blemish Energy Extractor:
+    
+    Combines 5 clinical signatures of acne blemishes with Hair & Beard Stubble Rejection:
+    1. Erythema Signature: Elevated localized delta a* redness (papules, inflamed acne, rosacea).
+    2. Whitehead Core Signature: Focal micro-specular luminance peak (L*) with steep radial gradient.
+    3. Blackhead / Clogged Pore Signature: Focal dark comedone core with high surrounding gradient.
+    4. Post-Inflammatory Hyperpigmentation (PIH): Melanin scar spots on Fitzpatrick Types III-VI.
+    5. Micro-Texture Disorder: High local variance in high-pass spatial frequency.
+    6. Linear Structure Tensor Filter: Distinguishes linear hair filaments & beard stubble from circular acne.
+    """
+    h, w, _ = img_rgb.shape
+    skin_float = skin_binary.astype(np.float32)
+
+    img_lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    l_chan, a_chan, b_chan = cv2.split(img_lab)
+
+    r = img_rgb[:, :, 0].astype(np.float32)
+    g = img_rgb[:, :, 1].astype(np.float32)
+
+    # 1. Baseline healthy skin estimation (broad Gaussian over skin region)
+    sigma_broad = max(18.0, min(h, w) * 0.06)
+    norm_w = cv2.GaussianBlur(skin_float, (0, 0), sigma_broad) + 1e-5
+    
+    baseline_a = cv2.GaussianBlur(a_chan * skin_float, (0, 0), sigma_broad) / norm_w
+    baseline_l = cv2.GaussianBlur(l_chan * skin_float, (0, 0), sigma_broad) / norm_w
+
+    # 2. Channel 1: Erythema Delta (Redness Inflammation)
+    norm_redness = (r - g) / (r + g + 12.0)
+    delta_a = np.maximum(0.0, a_chan - baseline_a)
+    erythema_energy = (delta_a * 0.65) + (norm_redness * 45.0 * 0.35)
+
+    # 3. Channel 2: Whitehead Specular Core (Local peak in L*)
+    sigma_micro = 2.0
+    l_micro = cv2.GaussianBlur(l_chan * skin_float, (0, 0), sigma_micro) / (cv2.GaussianBlur(skin_float, (0, 0), sigma_micro) + 1e-5)
+    whitehead_energy = np.maximum(0.0, l_micro - baseline_l)
+    whitehead_energy = np.clip(whitehead_energy * 0.45, 0.0, 30.0)
+
+    # 4. Channel 3: Post-Inflammatory Hyperpigmentation (PIH) & Comedones (Focal L* depression)
+    pih_energy = np.maximum(0.0, baseline_l - l_micro)
+    pih_energy = np.clip(pih_energy * 0.40, 0.0, 25.0)
+
+    # 5. Channel 4: Local Texture Disorder (High-pass variance)
+    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    high_pass = np.abs(gray - cv2.GaussianBlur(gray, (5, 5), 0))
+    texture_disorder = cv2.GaussianBlur(high_pass, (3, 3), 0)
+
+    # 6. Multi-Scale Difference of Gaussians (DoG) for isolated focal spots (2px to 20px)
+    scales = [(1.2, 2.4), (2.0, 4.2), (3.5, 7.5), (5.5, 12.0), (8.0, 16.0)]
+    dog_maps = []
+    
+    combined_signal = (erythema_energy * 0.50) + (whitehead_energy * 0.20) + (pih_energy * 0.15) + (texture_disorder * 0.15)
+
+    for s1, s2 in scales:
+        g1 = cv2.GaussianBlur(combined_signal, (0, 0), s1)
+        g2 = cv2.GaussianBlur(combined_signal, (0, 0), s2)
+        dog = np.maximum(0.0, g1 - g2)
+        dog_maps.append(dog)
+
+    spot_energy = np.maximum.reduce(dog_maps)
+
+    # 7. Structure Tensor Linearity Filter: Suppresses linear beard stubble & hair roots
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    j_xx = cv2.GaussianBlur(gx * gx, (5, 5), 0)
+    j_yy = cv2.GaussianBlur(gy * gy, (5, 5), 0)
+    j_xy = cv2.GaussianBlur(gx * gy, (5, 5), 0)
+    trace = j_xx + j_yy
+    disc = np.sqrt(np.maximum(0.0, (j_xx - j_yy) ** 2 + 4.0 * (j_xy ** 2)))
+    lambda1 = (trace + disc) / 2.0
+    lambda2 = (trace - disc) / 2.0
+    coherence = (lambda1 - lambda2) / (lambda1 + lambda2 + 1e-4)
+    hair_attenuation = np.clip(1.0 - (coherence - 0.38) * 2.2, 0.05, 1.0)
+    spot_energy = spot_energy * hair_attenuation
+
+    # 8. Erode skin margin to protect jawline/hairline boundaries
+    kernel_skin_margin = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    skin_inner = cv2.erode(skin_binary, kernel_skin_margin)
+    spot_energy[skin_inner == 0] = 0.0
+
+    # 9. Structural Edge Exclusion (protect sharp boundaries: lips, nose tip, eyelids)
+    edges = cv2.Canny(gray.astype(np.uint8), 35, 95)
+    kernel_edge = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    edge_exclusion = cv2.dilate(edges, kernel_edge)
+    spot_energy[edge_exclusion > 0] *= 0.12
+
+    return spot_energy
 
 
 def detect_pimple_candidates(
@@ -35,21 +174,20 @@ def detect_pimple_candidates(
     skin_mask: np.ndarray,
     sensitivity: float = 0.5,
     min_radius: int = 2,
-    max_radius: int = 35,
+    max_radius: int = 25,
     gemini_api_key: Optional[str] = None
 ) -> Tuple[List[Dict[str, Any]], np.ndarray]:
     """
-    Layer 2 — Advanced Multi-Scale Adaptive Blemish Detection & Organic Masking.
+    Precision Hybrid Pimple & Blemish Detection Pipeline.
     
-    Features:
-    1. Multi-Spectral Erythema Fusion (CIELAB a*, Normalized Erythema Index, Melanin/Lightness Depression, Pustule Apex).
-    2. Multi-Scale Morphological Top-Hat & Difference of Gaussians (DoG) with Resolution Scaling.
-    3. Spatially Local Adaptive Contrast Windowing (handles shadow & highlight areas equally).
-    4. Organic Contour Growth (accurately encompasses blemish core + erythema halo).
-    5. Structural Edge Exclusion (preserves lips, nostrils, eyelid creases, facial contours).
+    Detects:
+    - Inflammatory acne (papules, pustules)
+    - Whiteheads & blackheads
+    - Post-inflammatory hyperpigmentation (PIH)
+    - Razor bumps and focal redness
     
     Returns:
-        blobs: List of candidate blob dicts {id, bbox, centroid, radius, confidence, active, label, contour}
+        blobs: List of candidate blob dicts {id, bbox, centroid, radius, confidence, active, label}
         binary_pimple_mask: uint8 2D array (0 or 255)
     """
     h, w, _ = img_rgb.shape
@@ -59,112 +197,33 @@ def detect_pimple_candidates(
         logger.warning("Skin mask is nearly empty. Detection skipped.")
         return [], np.zeros((h, w), dtype=np.uint8)
 
-    scale_factor = max(1.0, min(h, w) / 1000.0)
+    # Stage A: Multi-channel blemish energy with hair rejection
+    spot_energy = compute_multi_channel_blemish_energy(img_rgb, skin_binary, sensitivity=sensitivity)
 
-    # -------------------------------------------------------------
-    # STAGE A: Multi-Spectral & Morphological Saliency Extraction
-    # -------------------------------------------------------------
-    img_lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
-    l_chan, a_chan, b_chan = cv2.split(img_lab)
-    
-    r = img_rgb[:, :, 0].astype(np.float32)
-    g = img_rgb[:, :, 1].astype(np.float32)
-    b = img_rgb[:, :, 2].astype(np.float32)
+    # Stage B: Adaptive Thresholding
+    skin_spots = spot_energy[skin_binary > 0]
+    if len(skin_spots) == 0:
+        return [], np.zeros((h, w), dtype=np.uint8)
 
-    # 1. Normalized Erythema Index & Redness
-    norm_redness = (r - g) / (r + g + 12.0)
-    erythema_idx = 100.0 * (np.log10(r + 1.0) - 0.5 * np.log10(g + 1.0) - 0.5 * np.log10(b + 1.0))
-    erythema_idx = np.clip(erythema_idx, 0, 100.0)
+    mean_val = float(np.mean(skin_spots))
+    std_val = float(np.std(skin_spots))
 
-    # 2. Local Baseline in LAB space
-    blur_kernel_size = max(25, int(min(h, w) * 0.08)) | 1
-    local_mean_a, local_std_a = compute_local_stats(a_chan, skin_binary, blur_kernel_size)
-    local_mean_l, local_std_l = compute_local_stats(l_chan, skin_binary, blur_kernel_size)
+    # Dynamic k threshold scaling: sensitivity 0.1 (strict) to 1.0 (sensitive)
+    k = (1.0 - max(0.05, min(1.0, sensitivity))) * 3.0 + 0.45
+    threshold = mean_val + (k * std_val)
 
-    # Delta signals
-    delta_redness = np.maximum(0, a_chan - local_mean_a)
-    delta_darkness = np.maximum(0, local_mean_l - l_chan)  # hyperpigmentation, scabs, blackheads
-    delta_apex = np.maximum(0, l_chan - local_mean_l)      # pustule white centers
+    candidate_mask = (spot_energy > threshold).astype(np.uint8) * 255
 
-    # 3. Multi-Scale Difference of Gaussians (DoG)
-    base_scales = [(1.0, 2.2), (1.8, 3.8), (3.0, 6.5), (5.0, 11.0), (8.0, 18.0), (12.0, 26.0)]
-    scales = [(s1 * scale_factor, s2 * scale_factor) for s1, s2 in base_scales]
-    
-    # Combined raw signal map
-    fused_signal = (
-        (delta_redness * 0.55) +
-        (norm_redness * 35.0 * 0.20) +
-        (erythema_idx * 0.15) +
-        (delta_darkness * 0.40) +
-        (delta_apex * 0.20)
-    )
-
-    dog_maps = []
-    for s1, s2 in scales:
-        g1 = cv2.GaussianBlur(fused_signal, (0, 0), s1)
-        g2 = cv2.GaussianBlur(fused_signal, (0, 0), s2)
-        dog = np.maximum(0, g1 - g2)
-        dog_maps.append(dog)
-        
-    dog_energy = np.maximum.reduce(dog_maps)
-
-    # 4. Multi-Scale Morphological Top-Hat Transforms (Curvature / Bump Detector)
-    tophat_maps = []
-    for r_k in [3, 7, 13, 21]:
-        rad_px = max(2, int(r_k * scale_factor))
-        kernel_morph = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (rad_px * 2 + 1, rad_px * 2 + 1))
-        # White top-hat on redness (raised inflamed bumps)
-        w_th = cv2.morphologyEx(a_chan.astype(np.uint8), cv2.MORPH_TOPHAT, kernel_morph).astype(np.float32)
-        # Black top-hat on lightness (dark comedones / scabs)
-        b_th = cv2.morphologyEx(l_chan.astype(np.uint8), cv2.MORPH_BLACKHAT, kernel_morph).astype(np.float32)
-        tophat_maps.append(w_th * 0.6 + b_th * 0.4)
-
-    tophat_energy = np.maximum.reduce(tophat_maps)
-
-    # Combined spot energy
-    spot_energy = (dog_energy * 0.65) + (tophat_energy * 0.35)
-
-    # 5. Boundary & Structural Feature Protection
-    margin_px = max(4, int(5 * scale_factor))
-    kernel_skin_margin = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (margin_px * 2 + 1, margin_px * 2 + 1))
-    skin_inner = cv2.erode(skin_binary, kernel_skin_margin)
-    spot_energy[skin_inner == 0] = 0.0
-
-    # Protect facial structural edges (eyes, lips, nostrils, jawline)
-    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
-    edges = cv2.Canny(gray, 40, 110)
-    edge_ksize = max(3, int(4 * scale_factor)) | 1
-    kernel_edge = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (edge_ksize, edge_ksize))
-    edge_exclusion = cv2.dilate(edges, kernel_edge)
-    spot_energy[edge_exclusion > 0] *= 0.08
-
-    # 6. Local Dynamic Contrast Thresholding
-    win_stat = max(31, int(min(h, w) * 0.10)) | 1
-    loc_mean_spot, loc_std_spot = compute_local_stats(spot_energy, skin_inner, win_stat)
-
-    # Sensitivity mapping: 0.1 (strict) to 1.0 (sensitive)
-    k_thresh = (1.0 - max(0.05, min(1.0, sensitivity))) * 3.4 + 0.45
-    adaptive_threshold = loc_mean_spot + (k_thresh * loc_std_spot)
-    adaptive_threshold = np.maximum(adaptive_threshold, 1.2)  # noise floor
-
-    candidate_mask = (spot_energy > adaptive_threshold).astype(np.uint8) * 255
-
-    # -------------------------------------------------------------
-    # STAGE B: Connected Components & Organic Contour Growth
-    # -------------------------------------------------------------
+    # Stage C: Morphological Blob Extraction & Shape Verification
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(candidate_mask)
     blobs: List[Dict[str, Any]] = []
     final_mask = np.zeros((h, w), dtype=np.uint8)
     blob_id = 1
 
-    # Scaled limits
-    eff_min_r = max(1, int(min_radius * scale_factor * 0.6))
-    eff_max_r = max(15, int(max_radius * scale_factor))
-
     for i in range(1, num_labels):
         area = int(stats[i, cv2.CC_STAT_AREA])
-        bx = int(stats[i, cv2.CC_STAT_LEFT])
-        by = int(stats[i, cv2.CC_STAT_TOP])
+        x = int(stats[i, cv2.CC_STAT_LEFT])
+        y = int(stats[i, cv2.CC_STAT_TOP])
         bw = int(stats[i, cv2.CC_STAT_WIDTH])
         bh = int(stats[i, cv2.CC_STAT_HEIGHT])
         cx, cy = float(centroids[i][0]), float(centroids[i][1])
@@ -173,53 +232,24 @@ def detect_pimple_candidates(
             continue
 
         aspect_ratio = float(bw) / float(bh)
-        # Exclude long linear features (hairs, wrinkles)
-        if aspect_ratio < 0.25 or aspect_ratio > 4.0:
+        if aspect_ratio < 0.28 or aspect_ratio > 3.4:
             continue
 
         eff_radius = int(math.ceil(math.sqrt(area / math.pi)))
-        if eff_radius < eff_min_r or eff_radius > eff_max_r:
+        if eff_radius < min_radius or eff_radius > max_radius:
             continue
 
-        # Confidence calculation
         blob_pixels = spot_energy[labels == i]
-        peak_val = float(np.max(blob_pixels)) if len(blob_pixels) > 0 else 1.0
-        local_ref_std = float(loc_std_spot[int(cy), int(cx)]) if 0 <= int(cy) < h and 0 <= int(cx) < w else 1.0
-        conf = min(0.99, max(0.40, float((peak_val / (local_ref_std * 3.0 + 1e-5)) * 0.35 + 0.60)))
+        peak_val = float(np.max(blob_pixels)) if len(blob_pixels) > 0 else threshold
+        conf = min(0.99, max(0.40, float((peak_val - threshold) / (std_val * 2.5 + 1e-5) * 0.45 + 0.55)))
 
-        # Adaptive radius covering blemish core + erythema halo margin
-        halo_margin = max(3, int(eff_radius * 0.45 + 2 * scale_factor))
-        radius_with_margin = eff_radius + halo_margin
+        pad = max(3, int(eff_radius * 0.35))
+        x1 = max(0, x - pad)
+        y1 = max(0, y - pad)
+        x2 = min(w, x + bw + pad)
+        y2 = min(h, y + bh + pad)
 
-        # Bounding box with context
-        pad = halo_margin + 2
-        x1 = max(0, bx - pad)
-        y1 = max(0, by - pad)
-        x2 = min(w, bx + bw + pad)
-        y2 = min(h, by + bh + pad)
-
-        # Generate organic local mask for this blob
-        # Extract local ROI around the blob
-        roi_y1 = max(0, int(cy - radius_with_margin - 3))
-        roi_y2 = min(h, int(cy + radius_with_margin + 4))
-        roi_x1 = max(0, int(cx - radius_with_margin - 3))
-        roi_x2 = min(w, int(cx + radius_with_margin + 4))
-
-        local_seed = (labels[roi_y1:roi_y2, roi_x1:roi_x2] == i).astype(np.uint8) * 255
-        # Dilate organically based on local erythema / spot energy
-        k_grow = max(3, halo_margin * 2 + 1)
-        kernel_grow = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_grow, k_grow))
-        local_organic = cv2.dilate(local_seed, kernel_grow)
-
-        # Smooth boundary
-        local_organic = cv2.GaussianBlur(local_organic, (5, 5), 0)
-        local_organic = (local_organic > 70).astype(np.uint8) * 255
-
-        # Place onto final mask
-        final_mask[roi_y1:roi_y2, roi_x1:roi_x2] = np.maximum(
-            final_mask[roi_y1:roi_y2, roi_x1:roi_x2],
-            local_organic
-        )
+        radius_with_margin = eff_radius + max(2, int(eff_radius * 0.45))
 
         blob_data = {
             "id": blob_id,
@@ -233,9 +263,15 @@ def detect_pimple_candidates(
             "source": "auto_cv"
         }
         blobs.append(blob_data)
+
+        cv2.circle(final_mask, (int(round(cx)), int(round(cy))), radius_with_margin, 255, -1)
         blob_id += 1
 
-    # Optional Stage B2: Gemini Vision VLM Verification / Augmentation
+    # Morphological cluster fusion on candidate mask
+    k_fuse = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_CLOSE, k_fuse)
+
+    # Optional Stage D: Gemini Vision VLM Verification / Augmentation
     if gemini_api_key:
         try:
             from gemini_detector import detect_blemishes_gemini
@@ -246,161 +282,137 @@ def detect_pimple_candidates(
                 vlm_np = np.array(vlm_mask_pil.convert("L"))
                 vlm_num, vlm_labels, vlm_stats, vlm_centroids = cv2.connectedComponentsWithStats((vlm_np > 128).astype(np.uint8))
                 for v in range(1, vlm_num):
+                    vc_area = int(vlm_stats[v, cv2.CC_STAT_AREA])
+                    if vc_area < 4:
+                        continue
                     vcx, vcy = float(vlm_centroids[v][0]), float(vlm_centroids[v][1])
-                    varea = int(vlm_stats[v, cv2.CC_STAT_AREA])
-                    v_rad = int(math.ceil(math.sqrt(varea / math.pi))) + max(3, int(3 * scale_factor))
-
-                    # Check if already covered by CV blob
-                    already_covered = False
-                    for b in blobs:
-                        bcx, bcy = b["centroid"]
-                        dist = math.hypot(vcx - bcx, vcy - bcy)
-                        if dist <= (b["radius"] + 4):
-                            already_covered = True
-                            b["confidence"] = min(0.99, b["confidence"] + 0.15)
-                            b["source"] = "cv+vlm"
-                            break
-
-                    if not already_covered:
-                        vx1 = max(0, int(vlm_stats[v, cv2.CC_STAT_LEFT]))
-                        vy1 = max(0, int(vlm_stats[v, cv2.CC_STAT_TOP]))
-                        vx2 = min(w, vx1 + int(vlm_stats[v, cv2.CC_STAT_WIDTH]))
-                        vy2 = min(h, vy1 + int(vlm_stats[v, cv2.CC_STAT_HEIGHT]))
-
+                    vr = int(math.ceil(math.sqrt(vc_area / math.pi))) + 3
+                    
+                    already_covered = any(
+                        math.hypot(b["centroid"][0] - vcx, b["centroid"][1] - vcy) < (b["radius"] * 1.2)
+                        for b in blobs
+                    )
+                    if not already_covered and skin_binary[int(vcy), int(vcx)] > 0:
+                        vpad = max(2, int(vr * 0.3))
                         blobs.append({
                             "id": blob_id,
-                            "bbox": [vx1, vy1, vx2, vy2],
+                            "bbox": [max(0, int(vcx - vr - vpad)), max(0, int(vcy - vr - vpad)),
+                                     min(w, int(vcx + vr + vpad)), min(h, int(vcy + vr + vpad))],
                             "centroid": [round(vcx, 1), round(vcy, 1)],
-                            "radius": v_rad,
-                            "area": varea,
-                            "confidence": 0.94,
+                            "radius": vr,
+                            "area": vc_area,
+                            "confidence": 0.92,
                             "active": True,
                             "label": "pimple",
-                            "source": "vlm"
+                            "source": "vlm_gemini"
                         })
-                        cv2.circle(final_mask, (int(round(vcx)), int(round(vcy))), v_rad, 255, -1)
+                        cv2.circle(final_mask, (int(round(vcx)), int(round(vcy))), vr, 255, -1)
                         blob_id += 1
         except Exception as e:
-            logger.warning(f"VLM verification error: {e}")
+            logger.warning(f"VLM verification warning: {e}")
 
-    logger.info(f"Advanced pimple detector produced {len(blobs)} candidate blobs.")
     return blobs, final_mask
 
 
-def blobs_to_mask(blobs: List[Dict[str, Any]], shape: Tuple[int, int], soft_falloff: bool = False) -> np.ndarray:
+def blobs_to_mask(blobs: List[Dict[str, Any]], shape: Tuple[int, int], dilate_px: int = 0) -> np.ndarray:
     """
-    Renders active blobs into a 2D uint8 mask (h, w).
-    Supports anti-aliased organic boundaries.
+    Converts active blemish blobs into a 2D uint8 mask with Morphological Cluster Fusion.
+    Fuses neighboring breakout acne spots into unified continuous organic contours.
     """
     h, w = shape[:2]
     mask = np.zeros((h, w), dtype=np.uint8)
-    for b in blobs:
-        if not b.get("active", True):
+    for blob in blobs:
+        if blob.get("active", True) is False:
             continue
-        cx, cy = b["centroid"]
-        r = b.get("radius", 6)
-        cv2.circle(mask, (int(round(cx)), int(round(cy))), int(round(r)), 255, -1)
-    
-    if soft_falloff:
-        mask = cv2.GaussianBlur(mask, (5, 5), 0)
+        cx = int(round(blob.get("centroid", [blob.get("x", 0), blob.get("y", 0)])[0]))
+        cy = int(round(blob.get("centroid", [blob.get("x", 0), blob.get("y", 0)])[1]))
+        r = int(blob.get("radius", blob.get("r", 6)))
+        cv2.circle(mask, (cx, cy), r, 255, -1)
+
+    # Morphological Cluster Fusion: bridges close breakout spots so no patchy un-healed gaps remain
+    k_fuse = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_fuse)
+
+    if dilate_px > 0:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_px * 2 + 1, dilate_px * 2 + 1))
+        mask = cv2.dilate(mask, kernel)
+
     return mask
 
 
 def add_blob_at_point(
-    img_rgb: np.ndarray,
-    skin_mask: np.ndarray,
-    x: int,
-    y: int,
-    existing_blobs: List[Dict[str, Any]],
-    default_radius: int = 8
+    blobs: Optional[List[Dict[str, Any]]] = None,
+    point: Optional[Tuple[int, int]] = None,
+    radius: int = 8,
+    shape: Optional[Tuple[int, int]] = None,
+    existing_blobs: Optional[List[Dict[str, Any]]] = None,
+    x: Optional[int] = None,
+    y: Optional[int] = None,
+    default_radius: int = 8,
+    img_rgb: Optional[np.ndarray] = None,
+    skin_mask: Optional[np.ndarray] = None
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """
-    Refinement Layer 4: Adds a new pimple blob at (x, y) with adaptive radius
-    computed from local color gradient / erythema bounds.
-    """
-    h, w = img_rgb.shape[:2]
-    x = max(0, min(w - 1, int(x)))
-    y = max(0, min(h - 1, int(y)))
-
-    # Estimate local spot radius via radial color gradient analysis
-    crop_r = 25
-    y1, y2 = max(0, y - crop_r), min(h, y + crop_r + 1)
-    x1, x2 = max(0, x - crop_r), min(w, x + crop_r + 1)
-
-    patch = img_rgb[y1:y2, x1:x2]
-    patch_lab = cv2.cvtColor(patch, cv2.COLOR_RGB2LAB).astype(np.float32)
-    center_a = patch_lab[y - y1, x - x1, 1]
-    center_l = patch_lab[y - y1, x - x1, 0]
-
-    # Measure radial distance where redness / darkness drops to background
-    ph, pw, _ = patch.shape
-    dist_map = np.zeros((ph, pw), dtype=np.float32)
-    for py in range(ph):
-        for px in range(pw):
-            dist_map[py, px] = math.hypot(px - (x - x1), py - (y - y1))
-
-    # Ring background estimate (radius 15-22)
-    outer_ring = (dist_map >= 15) & (dist_map <= 22)
-    if np.sum(outer_ring) > 10:
-        bg_a = float(np.median(patch_lab[outer_ring, 1]))
-        bg_l = float(np.median(patch_lab[outer_ring, 0]))
-        # Pixels with significant deviation from background
-        deviation = np.abs(patch_lab[:, :, 1] - bg_a) + 0.5 * np.maximum(0, bg_l - patch_lab[:, :, 0])
-        spot_pixels = (deviation > 3.5) & (dist_map <= 20)
-        if np.sum(spot_pixels) >= 5:
-            calc_radius = int(math.ceil(np.max(dist_map[spot_pixels]))) + 2
-            calc_radius = max(3, min(30, calc_radius))
-        else:
-            calc_radius = default_radius
+    """Adds a new manual blemish blob with intelligent auto-radius estimation."""
+    target_blobs = blobs if blobs is not None else (existing_blobs if existing_blobs is not None else [])
+    
+    if point is not None:
+        cx, cy = point
+    elif x is not None and y is not None:
+        cx, cy = x, y
     else:
-        calc_radius = default_radius
+        cx, cy = 0, 0
 
-    new_id = max([b["id"] for b in existing_blobs], default=0) + 1
+    if img_rgb is not None:
+        eff_radius = estimate_clicked_blemish_radius(img_rgb, cx, cy, default_r=default_radius)
+    else:
+        eff_radius = radius if radius != 8 else default_radius
+
+    next_id = max([b.get("id", 0) for b in target_blobs], default=0) + 1
+    
+    w = shape[1] if shape else (img_rgb.shape[1] if img_rgb is not None else 9999)
+    h = shape[0] if shape else (img_rgb.shape[0] if img_rgb is not None else 9999)
+
+    pad = max(2, int(eff_radius * 0.35))
     new_blob = {
-        "id": new_id,
-        "bbox": [max(0, x - calc_radius - 3), max(0, y - calc_radius - 3), min(w, x + calc_radius + 3), min(h, y + calc_radius + 3)],
-        "centroid": [float(x), float(y)],
-        "radius": calc_radius,
-        "area": int(math.pi * calc_radius * calc_radius),
+        "id": next_id,
+        "bbox": [max(0, int(cx - eff_radius - pad)), max(0, int(cy - eff_radius - pad)),
+                 min(w, int(cx + eff_radius + pad)), min(h, int(cy + eff_radius + pad))],
+        "centroid": [float(cx), float(cy)],
+        "radius": int(eff_radius),
+        "area": int(math.pi * eff_radius * eff_radius),
         "confidence": 1.0,
         "active": True,
-        "label": "pimple",
+        "label": "manual_pimple",
         "source": "manual_click"
     }
-
-    updated_blobs = list(existing_blobs)
-    updated_blobs.append(new_blob)
-    return updated_blobs, new_blob
+    target_blobs.append(new_blob)
+    return target_blobs, new_blob
 
 
 def toggle_blob_at_point(
-    x: int,
-    y: int,
-    existing_blobs: List[Dict[str, Any]],
-    hit_radius: int = 14
+    blobs: Optional[List[Dict[str, Any]]] = None,
+    point: Optional[Tuple[int, int]] = None,
+    existing_blobs: Optional[List[Dict[str, Any]]] = None,
+    x: Optional[int] = None,
+    y: Optional[int] = None,
+    hit_radius_multiplier: float = 1.6
 ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
-    """
-    Refinement Layer 4: Toggles the active state of an existing blob if clicked.
-    """
-    updated_blobs = []
-    toggled_blob = None
-    min_dist = float("inf")
-    target_id = None
+    """Toggles active state of a blob clicked by the user."""
+    target_blobs = blobs if blobs is not None else (existing_blobs if existing_blobs is not None else [])
+    
+    if point is not None:
+        px, py = point
+    elif x is not None and y is not None:
+        px, py = x, y
+    else:
+        return target_blobs, None
 
-    for b in existing_blobs:
-        cx, cy = b["centroid"]
-        dist = math.hypot(x - cx, y - cy)
-        r = b.get("radius", 8)
-        effective_hit = max(hit_radius, r + 5)
-        if dist <= effective_hit and dist < min_dist:
-            min_dist = dist
-            target_id = b["id"]
-
-    for b in existing_blobs:
-        b_copy = dict(b)
-        if b["id"] == target_id:
-            b_copy["active"] = not b.get("active", True)
-            toggled_blob = b_copy
-        updated_blobs.append(b_copy)
-
-    return updated_blobs, toggled_blob
+    for blob in target_blobs:
+        bx = blob.get("centroid", [blob.get("x", 0), blob.get("y", 0)])[0]
+        by = blob.get("centroid", [blob.get("x", 0), blob.get("y", 0)])[1]
+        r = blob.get("radius", blob.get("r", 8))
+        dist = math.hypot(bx - px, by - py)
+        if dist <= (r * hit_radius_multiplier):
+            blob["active"] = not blob.get("active", True)
+            return target_blobs, blob
+    return target_blobs, None
