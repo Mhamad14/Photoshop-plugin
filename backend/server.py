@@ -189,10 +189,8 @@ def blend_skin_texture(
 ) -> np.ndarray:
     """
     Annular Healthy Pore Texture Synthesis & Grain Matching:
-    
-    Rather than re-injecting the infected blemish texture itself, samples organic
-    micro-pore high frequencies from the clean surrounding skin annulus (ring)
-    and synthesizes them across the healed patch.
+    Samples organic micro-pore high frequencies from the clean surrounding skin annulus
+    and synthesizes them across the healed patch without darkening.
     """
     h, w, c = inpainted_img.shape
     orig_f = original_img.astype(np.float32)
@@ -204,9 +202,9 @@ def blend_skin_texture(
         blurred_orig = cv2.GaussianBlur(orig_f, (5, 5), 0)
         high_freq = orig_f - blurred_orig
 
-        # 2. Extract clean annular healthy skin texture ring (2px to 10px outside blemish)
-        k_inner = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        k_outer = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        # 2. Extract clean annular healthy skin texture ring (3px to 12px outside blemish)
+        k_inner = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        k_outer = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17))
         mask_inner = cv2.dilate(mask_gray, k_inner)
         mask_outer = cv2.dilate(mask_gray, k_outer)
         annulus_mask = np.clip(mask_outer.astype(np.float32) - mask_inner.astype(np.float32), 0.0, 255.0) / 255.0
@@ -215,21 +213,12 @@ def blend_skin_texture(
         healthy_annulus_texture = cv2.GaussianBlur(high_freq * annulus_mask[:, :, None], (7, 7), 0)
 
         # Seamlessly inject healthy pore structure into the inpainted core
-        inpaint_f = inpaint_f + (healthy_annulus_texture * (texture_blend * 1.5) * mask_f)
+        inpaint_f = inpaint_f + (healthy_annulus_texture * (texture_blend * 1.2) * mask_f)
 
     # 3. Add sensor micro-grain matching
     if grain_intensity > 0:
-        # Add micro-grain matched to skin tone
         noise = np.random.normal(loc=0.0, scale=grain_intensity * 255.0, size=(h, w, c))
         inpaint_f = inpaint_f + (noise * mask_f)
-
-    # Local Illumination Gradient Alignment (Prevents ghost circles on shadows/highlights)
-    # Match low-frequency illumination of inpainted patch to healthy surroundings
-    k_illum = max(31, int(min(h, w) * 0.05)) | 1
-    orig_illum = cv2.GaussianBlur(orig_f, (k_illum, k_illum), 0)
-    inpaint_illum = cv2.GaussianBlur(inpaint_f, (k_illum, k_illum), 0)
-    illum_delta = (orig_illum - inpaint_illum) * mask_f * 0.45
-    inpaint_f = inpaint_f + illum_delta
 
     return np.clip(inpaint_f, 0, 255).astype(np.uint8)
 
@@ -617,15 +606,14 @@ async def preview_result(
                 bc["radius"] = max(2.0, b.get("radius", 6) * coord_scale)
                 scaled_blobs.append(bc)
 
-            pimple_mask = blobs_to_mask(scaled_blobs, (h, w), dilate_px=0)
+            pimple_mask = blobs_to_mask(scaled_blobs, (h, w), dilate_px=3)
             healed_pixels = int(np.sum(pimple_mask > 0))
 
             if healed_pixels > 0:
-                clean_rgb = neutralize_erythema(current_rgb, pimple_mask)
-
                 if heal_mode == "calm_redness":
-                    final_rgb = clean_rgb
+                    final_rgb = neutralize_erythema(current_rgb, pimple_mask)
                 elif heal_mode == "flatten_bump":
+                    clean_rgb = neutralize_erythema(current_rgb, pimple_mask)
                     orig_f = current_rgb.astype(np.float32)
                     blurred_low = cv2.GaussianBlur(orig_f, (15, 15), 0)
                     high_freq = orig_f - blurred_low
@@ -637,10 +625,10 @@ async def preview_result(
                         raise HTTPException(status_code=503, detail="AI inpainting model is not loaded.")
                     inpainted_np = inpaint_with_context_tiling(
                         model=lama_model,
-                        img_rgb=clean_rgb,
+                        img_rgb=current_rgb,
                         mask_gray=pimple_mask,
                         max_tile_size=768,
-                        context_pad=40
+                        context_pad=50
                     )
                     final_rgb = blend_skin_texture(
                         original_img=current_rgb,
@@ -650,7 +638,7 @@ async def preview_result(
                         grain_intensity=max(0.0, min(0.2, grain_intensity))
                     )
 
-                feathered_alpha = apply_feather(pimple_mask, feather_radius=max(0, feather_radius))
+                feathered_alpha = apply_feather(pimple_mask, feather_radius=max(1, feather_radius))
                 alpha_f = (feathered_alpha.astype(np.float32) / 255.0)[:, :, None]
                 current_rgb = np.clip(
                     final_rgb.astype(np.float32) * alpha_f + current_rgb.astype(np.float32) * (1.0 - alpha_f),
@@ -945,14 +933,14 @@ def inpaint_hires_seamless(
     
     # If image is reasonably sized (<=1400px), run full-frame directly
     if max(h, w) <= 1400:
-        inpainted_pil = lama_model(Image.fromarray(clean_rgb), Image.fromarray(mask_np))
+        inpainted_pil = lama_model(Image.fromarray(img_rgb), Image.fromarray(mask_np))
         if inpainted_pil.size != (w, h):
             inpainted_pil = inpainted_pil.resize((w, h), Image.Resampling.BILINEAR)
         inpainted_np = np.array(inpainted_pil)
         return blend_skin_texture(img_rgb, inpainted_np, mask_np, texture_blend, grain_intensity)
     
     # High-Resolution Tiled Inpainting for large documents
-    output_rgb = clean_rgb.copy()
+    output_rgb = img_rgb.copy()
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_np)
     
     for i in range(1, num_labels):
@@ -967,7 +955,7 @@ def inpaint_hires_seamless(
         x2 = min(w, x + bw + pad)
         y2 = min(h, y + bh + pad)
         
-        crop_rgb = clean_rgb[y1:y2, x1:x2]
+        crop_rgb = img_rgb[y1:y2, x1:x2]
         crop_mask = mask_np[y1:y2, x1:x2]
         
         if crop_rgb.size == 0 or np.sum(crop_mask) == 0:

@@ -84,6 +84,39 @@ const applyBtnText = document.getElementById("apply-btn-text");
 const logBox = document.getElementById("log-box");
 const logMessage = document.getElementById("log-message");
 
+/* Debug Console Elements */
+const btnToggleDebug = document.getElementById("btn-toggle-debug");
+const drawerDebug = document.getElementById("drawer-debug");
+const debugTerminal = document.getElementById("debug-terminal");
+const btnRunDiagnostics = document.getElementById("btn-run-diagnostics");
+const btnCopyDebugLogs = document.getElementById("btn-copy-debug-logs");
+const btnClearDebugLogs = document.getElementById("btn-clear-debug-logs");
+
+const debugLogs = [];
+
+function logDebug(msg, type = "info") {
+  const d = new Date();
+  const timeStr = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+  const formatted = `[${timeStr}] [${type.toUpperCase()}] ${msg}`;
+  debugLogs.push(formatted);
+  if (debugTerminal) {
+    const line = document.createElement("div");
+    line.className = `debug-line ${type}`;
+    line.textContent = formatted;
+    debugTerminal.appendChild(line);
+    debugTerminal.scrollTop = debugTerminal.scrollHeight;
+  }
+  console.log(formatted);
+}
+
+// Global exception interceptors
+window.addEventListener("error", (evt) => {
+  logDebug(`Unhandled Error: ${evt.message || evt} (at ${evt.filename}:${evt.lineno})`, "error");
+});
+window.addEventListener("unhandledrejection", (evt) => {
+  logDebug(`Unhandled Promise Rejection: ${evt.reason ? (evt.reason.stack || evt.reason.message || evt.reason) : evt}`, "error");
+});
+
 /* ============================== STATE ============================== */
 let isServerOnline = false;
 let isProcessing = false;
@@ -163,12 +196,95 @@ function rgbToLab(r, g, b) {
   ];
 }
 
-function loadImage(src) {
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const len = bytes.length;
+  const chunkSize = 16384;
+  for (let i = 0; i < len; i += chunkSize) {
+    const chunk = bytes.subarray(i, Math.min(i + chunkSize, len));
+    binary += String.fromCharCode.apply(null, chunk);
+  }
+  return btoa(binary);
+}
+
+async function blobToDataUrl(blob) {
+  if (typeof blob === "string") return blob;
+  if (blob._dataUrl) return blob._dataUrl;
+  const buffer = await blob.arrayBuffer();
+  const b64 = arrayBufferToBase64(buffer);
+  const mime = blob.type || "image/png";
+  const url = `data:${mime};base64,${b64}`;
+  blob._dataUrl = url;
+  return url;
+}
+
+function loadImage(src, holderId = "img-portrait-holder") {
   return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
+    let img = document.getElementById(holderId);
+    if (!img) {
+      const container = document.getElementById("image-loader-cache") || document.body;
+      img = document.createElement("img");
+      img.id = holderId;
+      container.appendChild(img);
+    }
+    let settled = false;
+
+    function finish() {
+      if (settled) return;
+      const nw = img.naturalWidth || img.width;
+      const nh = img.naturalHeight || img.height;
+      if (!nw || !nh || nw === 0 || nh === 0) return; // Wait for real pixel dimensions!
+      settled = true;
+      clearInterval(pollInterval);
+      clearTimeout(timeoutId);
+      logDebug(`Image [${holderId}] decoded: ${nw}x${nh}px`, "ok");
+      resolve(img);
+    }
+
+    img.onload = () => {
+      finish();
+    };
+
+    img.onerror = (err) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(pollInterval);
+      clearTimeout(timeoutId);
+      logDebug(`Image [${holderId}] decode error: ${err ? (err.message || err) : "unknown"}`, "error");
+      reject(new Error("Image decode error: " + (err ? (err.message || err) : "unknown")));
+    };
+
     img.src = src;
+
+    // Check if immediately decoded
+    if ((img.naturalWidth && img.naturalWidth > 0) || (img.width && img.width > 0)) {
+      finish();
+      if (settled) return;
+    }
+
+    const pollInterval = setInterval(() => {
+      if (settled) {
+        clearInterval(pollInterval);
+        return;
+      }
+      if ((img.naturalWidth && img.naturalWidth > 0) || (img.width && img.width > 0)) {
+        finish();
+      }
+    }, 20);
+
+    const timeoutId = setTimeout(() => {
+      clearInterval(pollInterval);
+      if (!settled) {
+        if ((img.naturalWidth && img.naturalWidth > 0) || (img.width && img.width > 0)) {
+          finish();
+        } else {
+          settled = true;
+          logDebug(`Image [${holderId}] decoding timed out.`, "warn");
+          resolve(img);
+        }
+      }
+    }, 4000);
   });
 }
 
@@ -182,10 +298,13 @@ function dataUrlToBlob(dataUrl, mime = "image/png") {
 
 /* ============================== SERVER STATUS ============================== */
 async function checkServerStatus() {
+  const current = getServerUrl();
   const candidateUrls = [
-    getServerUrl(),
+    current,
     "http://127.0.0.1:8765",
+    "http://localhost:8765",
     "http://127.0.0.1:8766",
+    "http://localhost:8766",
     "http://127.0.0.1:8001"
   ].filter((v, i, a) => v && a.indexOf(v) === i);
 
@@ -195,7 +314,7 @@ async function checkServerStatus() {
   for (const baseUrl of candidateUrls) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2000);
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
       const response = await fetch(`${baseUrl}/health`, { method: "GET", signal: controller.signal });
       clearTimeout(timeoutId);
 
@@ -245,52 +364,58 @@ window.addEventListener("resize", () => {
 
 /* ============================== CANVAS RENDERING ============================== */
 function drawChip(ctx, x, y, text, alignRight = false) {
-  ctx.font = "700 9px Segoe UI, sans-serif";
-  const padX = 6, padY = 4;
-  const tw = ctx.measureText(text).width;
-  const w = tw + padX * 2;
-  const h = 14;
-  const rx = alignRight ? x - w : x;
-  ctx.fillStyle = "rgba(0,0,0,0.62)";
-  ctx.beginPath();
-  if (ctx.roundRect) { ctx.roundRect(rx, y, w, h, 3); } else { ctx.rect(rx, y, w, h); }
-  ctx.fill();
-  ctx.fillStyle = "#ffffff";
-  ctx.textBaseline = "middle";
-  ctx.fillText(text, rx + padX, y + h / 2 + 0.5);
+  if (!ctx) return;
+  try {
+    ctx.font = "700 9px Segoe UI, sans-serif";
+    const padX = 6, padY = 4;
+    const tw = ctx.measureText ? ctx.measureText(text).width : (text.length * 5);
+    const w = tw + padX * 2;
+    const h = 14;
+    const rx = alignRight ? x - w : x;
+    ctx.fillStyle = "rgba(0,0,0,0.62)";
+    ctx.beginPath();
+    ctx.rect(rx, y, w, h);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, rx + padX, y + h / 2 + 0.5);
+  } catch (e) {}
 }
 
 function drawSplitDivider(ctx, splitX) {
-  const ch = previewCanvas.height;
-  ctx.strokeStyle = "rgba(255,255,255,0.9)";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(splitX, 0);
-  ctx.lineTo(splitX, ch);
-  ctx.stroke();
+  if (!ctx) return;
+  try {
+    const ch = previewCanvas.height;
+    ctx.strokeStyle = "rgba(255,255,255,0.9)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(splitX, 0);
+    ctx.lineTo(splitX, ch);
+    ctx.stroke();
 
-  const cy = Math.round(ch / 2);
-  ctx.beginPath();
-  ctx.arc(splitX, cy, 11, 0, Math.PI * 2);
-  ctx.fillStyle = "#ffffff";
-  ctx.fill();
-  ctx.strokeStyle = "rgba(59,130,246,0.9)";
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
+    const cy = Math.round(ch / 2);
+    ctx.beginPath();
+    ctx.arc(splitX, cy, 11, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(59,130,246,0.9)";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
 
-  ctx.fillStyle = "#1d4ed8";
-  ctx.beginPath();
-  ctx.moveTo(splitX - 5, cy);
-  ctx.lineTo(splitX - 1.5, cy - 3.5);
-  ctx.lineTo(splitX - 1.5, cy + 3.5);
-  ctx.closePath();
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(splitX + 5, cy);
-  ctx.lineTo(splitX + 1.5, cy - 3.5);
-  ctx.lineTo(splitX + 1.5, cy + 3.5);
-  ctx.closePath();
-  ctx.fill();
+    ctx.fillStyle = "#1d4ed8";
+    ctx.beginPath();
+    ctx.moveTo(splitX - 5, cy);
+    ctx.lineTo(splitX - 1.5, cy - 3.5);
+    ctx.lineTo(splitX - 1.5, cy + 3.5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(splitX + 5, cy);
+    ctx.lineTo(splitX + 1.5, cy - 3.5);
+    ctx.lineTo(splitX + 1.5, cy + 3.5);
+    ctx.closePath();
+    ctx.fill();
+  } catch (e) {}
 }
 
 function splitCanvasX() {
@@ -301,12 +426,13 @@ function splitCanvasX() {
 function renderCanvas() {
   if (!currentPortraitImage) return;
   const ctx = previewCanvas.getContext("2d");
+  if (!ctx) return;
   const cw = previewCanvas.width;
   const ch = previewCanvas.height;
   ctx.clearRect(0, 0, cw, ch);
 
-  const imgW = currentPortraitImage.naturalWidth || currentPortraitImage.width;
-  const imgH = currentPortraitImage.naturalHeight || currentPortraitImage.height;
+  const imgW = currentPortraitImage.naturalWidth || currentPortraitImage.width || 500;
+  const imgH = currentPortraitImage.naturalHeight || currentPortraitImage.height || 500;
   const scale = Math.min(cw / imgW, ch / imgH);
   const renderW = imgW * scale;
   const renderH = imgH * scale;
@@ -315,80 +441,98 @@ function renderCanvas() {
   viewGeom = { scale, offX, offY, renderW, renderH };
 
   // 1. BEFORE base
-  ctx.drawImage(currentPortraitImage, offX, offY, renderW, renderH);
+  try {
+    ctx.drawImage(currentPortraitImage, offX, offY, renderW, renderH);
+  } catch (drawErr) {
+    logDebug(`ctx.drawImage BEFORE error: ${drawErr.message || drawErr}`, "warn");
+  }
 
   // 2. AFTER region
   let overlayLimitX = cw;
   if (viewMode === "after") {
     if (resultImage) {
-      ctx.drawImage(resultImage, offX, offY, renderW, renderH);
-      overlayLimitX = -1;
+      try {
+        ctx.drawImage(resultImage, offX, offY, renderW, renderH);
+        overlayLimitX = -1;
+      } catch (drawErr) {
+        logDebug(`ctx.drawImage AFTER error: ${drawErr.message || drawErr}`, "warn");
+      }
     }
   } else if (viewMode === "split") {
     const splitX = splitCanvasX();
+    overlayLimitX = splitX;
     if (resultImage) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(splitX, 0, cw - splitX, ch);
-      ctx.clip();
-      ctx.drawImage(resultImage, offX, offY, renderW, renderH);
-      ctx.restore();
-      overlayLimitX = splitX;
+      try {
+        // Draw the right half using 9-parameter drawImage slice (sx, sy, sw, sh, dx, dy, dw, dh)
+        const relSplit = Math.max(0, Math.min(1, splitPos));
+        const resW = resultImage.naturalWidth || resultImage.width || imgW;
+        const resH = resultImage.naturalHeight || resultImage.height || imgH;
+        const srcX = resW * relSplit;
+        const srcW = resW * (1 - relSplit);
+        const dstX = offX + renderW * relSplit;
+        const dstW = renderW * (1 - relSplit);
+        if (srcW > 0 && dstW > 0) {
+          ctx.drawImage(resultImage, srcX, 0, srcW, resH, dstX, offY, dstW, renderH);
+        }
+      } catch (drawErr) {
+        logDebug(`ctx.drawImage SPLIT slice error: ${drawErr.message || drawErr}`, "warn");
+      }
     }
   }
 
-  // 3. Detection overlays (clipped to the BEFORE side)
+  // 3. Detection overlays (drawn only on the BEFORE side)
   if (overlayLimitX > 0) {
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, overlayLimitX, ch);
-    ctx.clip();
-
-    if (chkShowSkin.checked && currentSkinMaskImage) {
-      const offCanvas = document.createElement("canvas");
-      offCanvas.width = cw;
-      offCanvas.height = ch;
-      const offCtx = offCanvas.getContext("2d");
-      offCtx.drawImage(currentSkinMaskImage, offX, offY, renderW, renderH);
-      offCtx.globalCompositeOperation = "source-in";
-      offCtx.fillStyle = "rgba(6, 182, 212, 0.32)";
-      offCtx.fillRect(0, 0, cw, ch);
-      ctx.drawImage(offCanvas, 0, 0);
+    if (chkShowSkin && chkShowSkin.checked && currentSkinMaskImage) {
+      try {
+        ctx.globalAlpha = 0.35;
+        if (viewMode === "split") {
+          const relSplit = Math.max(0, Math.min(1, splitPos));
+          const srcW = imgW * relSplit;
+          const dstW = renderW * relSplit;
+          if (srcW > 0 && dstW > 0) {
+            ctx.drawImage(currentSkinMaskImage, 0, 0, srcW, imgH, offX, offY, dstW, renderH);
+          }
+        } else {
+          ctx.drawImage(currentSkinMaskImage, offX, offY, renderW, renderH);
+        }
+        ctx.globalAlpha = 1.0;
+      } catch (skinErr) {
+        console.warn("Skin mask overlay draw fallback:", skinErr);
+      }
     }
 
-    if (chkShowPimples.checked && currentBlobs.length > 0) {
+    if (chkShowPimples && chkShowPimples.checked && currentBlobs.length > 0) {
       for (const blob of currentBlobs) {
         const bcx = blob.centroid[0] * scale + offX;
         const bcy = blob.centroid[1] * scale + offY;
         const br = Math.max(3, blob.radius * scale);
         if (bcx > overlayLimitX + br) continue;
 
-        if (blob.active !== false) {
-          ctx.beginPath();
-          ctx.arc(bcx, bcy, br + 2, 0, Math.PI * 2);
-          ctx.fillStyle = "rgba(244,63,94,0.22)";
-          ctx.fill();
-          ctx.beginPath();
-          ctx.arc(bcx, bcy, br, 0, Math.PI * 2);
-          ctx.strokeStyle = "#f43f5e";
-          ctx.lineWidth = 1.6;
-          ctx.stroke();
-          ctx.beginPath();
-          ctx.arc(bcx, bcy, 1.4, 0, Math.PI * 2);
-          ctx.fillStyle = "#ffffff";
-          ctx.fill();
-        } else {
-          ctx.beginPath();
-          ctx.arc(bcx, bcy, br, 0, Math.PI * 2);
-          ctx.strokeStyle = "rgba(161,161,170,0.55)";
-          ctx.lineWidth = 1.1;
-          ctx.setLineDash([2, 2]);
-          ctx.stroke();
-          ctx.setLineDash([]);
-        }
+        try {
+          if (blob.active !== false) {
+            ctx.beginPath();
+            ctx.arc(bcx, bcy, br + 2, 0, Math.PI * 2);
+            ctx.fillStyle = "rgba(244,63,94,0.22)";
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(bcx, bcy, br, 0, Math.PI * 2);
+            ctx.strokeStyle = "#f43f5e";
+            ctx.lineWidth = 1.6;
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(bcx, bcy, 1.4, 0, Math.PI * 2);
+            ctx.fillStyle = "#ffffff";
+            ctx.fill();
+          } else {
+            ctx.beginPath();
+            ctx.arc(bcx, bcy, br, 0, Math.PI * 2);
+            ctx.strokeStyle = "rgba(161,161,170,0.55)";
+            ctx.lineWidth = 1.1;
+            ctx.stroke();
+          }
+        } catch (blobDrawErr) {}
       }
     }
-    ctx.restore();
   }
 
   // 4. Split UI chrome
@@ -607,8 +751,8 @@ async function runPreview() {
     if (!res.ok) throw new Error(`Preview failed (${res.status}): ${await res.text()}`);
 
     const blob = await res.blob();
-    const imgUrl = URL.createObjectURL(blob);
-    const img = await loadImage(imgUrl);
+    const imgUrl = await blobToDataUrl(blob);
+    const img = await loadImage(imgUrl, "img-result-holder");
     if (seq !== previewSeq) return; // a newer request superseded this one
 
     resultImage = img;
@@ -632,7 +776,47 @@ async function runPreview() {
 
 /* ============================== PHOTOSHOP EXPORT SNAPSHOT ============================== */
 async function exportFullPortrait() {
-  const origDocId = app.activeDocument ? app.activeDocument.id : null;
+  logDebug("Starting exportFullPortrait()...", "info");
+  const doc = app.activeDocument;
+  if (!doc) {
+    logDebug("exportFullPortrait failed: No active document found.", "error");
+    throw new Error("No active document. Open a portrait photo in Photoshop first.");
+  }
+  logDebug(`Active document: "${doc.name || 'Untitled'}" (${doc.width}x${doc.height}px, mode=${doc.mode})`, "info");
+
+  // Strategy 1: Ultra-fast native UXP Imaging API
+  if (photoshop.imaging && typeof photoshop.imaging.getPixels === "function" && typeof photoshop.imaging.encodeImageData === "function") {
+    try {
+      logDebug("Capturing via photoshop.imaging API...", "info");
+      const t0 = Date.now();
+      const base64Data = await core.executeAsModal(async () => {
+        const pixels = await photoshop.imaging.getPixels({
+          documentID: doc.id
+        });
+        const encoded = await photoshop.imaging.encodeImageData({
+          imageData: pixels.imageData,
+          base64: true,
+          format: "png"
+        });
+        pixels.imageData.dispose();
+        return encoded;
+      }, { commandName: "Capture Portrait Snapshot" });
+
+      if (base64Data) {
+        const dt = Date.now() - t0;
+        const fullDataUrl = typeof base64Data === "string" && base64Data.startsWith("data:") ? base64Data : `data:image/png;base64,${base64Data}`;
+        const blob = dataUrlToBlob(fullDataUrl);
+        logDebug(`Imaging capture succeeded in ${dt}ms (${(blob.size / 1024).toFixed(1)} KB)`, "ok");
+        return blob;
+      }
+    } catch (imagingErr) {
+      logDebug(`Imaging API fallback: ${imagingErr.message || imagingErr}`, "warn");
+    }
+  }
+
+  // Strategy 2: Document Save Copy Fallback
+  logDebug("Capturing via temporary PNG file export...", "info");
+  const t0 = Date.now();
   const tempFolder = await localFileSystem.getTemporaryFolder();
   const portraitFile = await tempFolder.createFile("portrait_temp.png", { overwrite: true });
   const portraitToken = localFileSystem.createSessionToken(portraitFile);
@@ -640,40 +824,26 @@ async function exportFullPortrait() {
   await core.executeAsModal(async () => {
     await action.batchPlay([
       {
-        _obj: "duplicate",
-        _target: [{ _ref: "document", _enum: "ordinal", _value: "targetEnum" }],
-        name: "AI_Portrait_Export_Temp"
+        _obj: "save",
+        as: {
+          _obj: "PNGFormat",
+          method: { _enum: "PNGMethod", _value: "quick" }
+        },
+        in: { _path: portraitToken, _kind: "local" },
+        copy: true,
+        lowerCase: true,
+        _options: { dialogOptions: "dontDisplay" }
       }
     ], {});
-
-    const dupDoc = app.activeDocument;
-    dupDoc.layers.forEach(l => {
-      if (l.name.startsWith("AI ")) l.visible = false;
-    });
-
-    try {
-      await action.batchPlay([
-        {
-          _obj: "save",
-          as: { _obj: "PNGFormat", method: { _enum: "PNGMethod", _value: "quick" } },
-          in: { _path: portraitToken, _kind: "local" },
-          saveStage: { _enum: "saveStageType", _value: "saveBegin" }
-        }
-      ], {});
-    } finally {
-      await action.batchPlay([
-        { _obj: "close", saving: { _enum: "yesNo", _value: "no" } }
-      ], {});
-      if (origDocId !== null && app.activeDocument && app.activeDocument.id !== origDocId) {
-        action.batchPlay([
-          { _obj: "select", _target: [{ _ref: "document", _enum: "id", _value: origDocId }] }
-        ], {}).catch(() => {});
-      }
-    }
   }, { commandName: "Export Portrait Snapshot" });
 
   const rawBytes = await portraitFile.read({ format: uxp.storage.formats.binary });
-  return new Blob([rawBytes], { type: "image/png" });
+  const b64 = arrayBufferToBase64(rawBytes);
+  const blob = new Blob([rawBytes], { type: "image/png" });
+  blob._dataUrl = `data:image/png;base64,${b64}`;
+  const dt = Date.now() - t0;
+  logDebug(`File export succeeded in ${dt}ms (${(blob.size / 1024).toFixed(1)} KB)`, "ok");
+  return blob;
 }
 
 /* ============================== LAYER PLACEMENT HELPERS ============================== */
@@ -855,30 +1025,53 @@ async function groupRetouchLayers(groupName, layerNames) {
 
 /* ============================== STEP 1: ANALYZE (Layers 1 + 2) ============================== */
 async function runAnalysis(isUserInitiated) {
+  logDebug(`[ANALYZE] Triggered (isUserInitiated=${isUserInitiated})`, "info");
   if (!isServerOnline) {
+    logDebug("[ANALYZE] Server is marked offline, checking connection...", "info");
     await checkServerStatus();
-    if (!isServerOnline) throw new Error("AI backend offline. Start it with backend\\run_server.bat");
+    if (!isServerOnline) {
+      logDebug("[ANALYZE] Error: Server offline. Cannot continue.", "error");
+      throw new Error("AI backend offline. Start it with backend\\run_server.bat");
+    }
   }
   const doc = app.activeDocument;
-  if (!doc) throw new Error("No active document. Open a portrait photo in Photoshop first.");
+  if (!doc) {
+    logDebug("[ANALYZE] Error: No active document open.", "error");
+    throw new Error("No active document. Open a portrait photo in Photoshop first.");
+  }
 
   if (isUserInitiated) setLog("Capturing snapshot \u0026 running AI segmentation\u2026", "info");
+  
+  logDebug("[ANALYZE] Step 1/4: Capturing document pixels...", "info");
   const portraitBlob = await exportFullPortrait();
   currentPortraitBlob = portraitBlob;
 
-  const imgUrl = URL.createObjectURL(portraitBlob);
+  logDebug("[ANALYZE] Step 2/4: Rendering snapshot to canvas...", "info");
+  const imgUrl = await blobToDataUrl(portraitBlob);
   currentPortraitImage = await loadImage(imgUrl);
 
-  // Native-res offscreen copy for instant pixel sampling
-  portraitDataCanvas = document.createElement("canvas");
-  portraitDataCanvas.width = currentPortraitImage.naturalWidth;
-  portraitDataCanvas.height = currentPortraitImage.naturalHeight;
-  portraitDataCanvas.getContext("2d").drawImage(currentPortraitImage, 0, 0);
+  const imgW = currentPortraitImage.naturalWidth || currentPortraitImage.width || 500;
+  const imgH = currentPortraitImage.naturalHeight || currentPortraitImage.height || 500;
 
-  resizeViewport(currentPortraitImage.naturalWidth, currentPortraitImage.naturalHeight);
+  portraitDataCanvas = document.getElementById("portrait-data-canvas");
+  if (portraitDataCanvas) {
+    portraitDataCanvas.width = imgW;
+    portraitDataCanvas.height = imgH;
+    try {
+      const pctx = portraitDataCanvas.getContext("2d");
+      if (pctx && typeof pctx.drawImage === "function") {
+        pctx.drawImage(currentPortraitImage, 0, 0);
+      }
+    } catch (drawErr) {
+      console.warn("Offscreen sampling canvas drawImage:", drawErr);
+    }
+  }
+
+  resizeViewport(imgW, imgH);
   canvasEmptyOverlay.classList.add("hidden");
   renderCanvas();
 
+  logDebug(`[ANALYZE] Step 3/4: Sending ${imgW}x${imgH}px snapshot to ${getServerUrl()}/analyze...`, "info");
   const formData = new FormData();
   formData.append("image", portraitBlob, "portrait.png");
   formData.append("sensitivity", (parseInt(sliderSensitivity.value, 10) / 100).toString());
@@ -886,11 +1079,19 @@ async function runAnalysis(isUserInitiated) {
   formData.append("detect_skin", "true");
   formData.append("include_neck", chkIncludeNeck.checked ? "true" : "false");
   formData.append("preserve_moles", chkPreserveMoles && chkPreserveMoles.checked ? "true" : "false");
-  formData.append("feather_radius", sliderFeather.value);
+  formData.append("feather_radius", sliderFeather ? sliderFeather.value : "3");
 
+  const tStart = Date.now();
   const res = await fetch(`${getServerUrl()}/analyze`, { method: "POST", body: formData });
-  if (!res.ok) throw new Error(`Analyze failed (${res.status}): ${await res.text()}`);
+  const analyzeDuration = Date.now() - tStart;
+  
+  if (!res.ok) {
+    const errText = await res.text();
+    logDebug(`[ANALYZE] /analyze returned error ${res.status}: ${errText}`, "error");
+    throw new Error(`Analyze failed (${res.status}): ${errText}`);
+  }
   const data = await res.json();
+  logDebug(`[ANALYZE] Step 4/4: /analyze completed in ${analyzeDuration}ms. Found ${data.blobs ? data.blobs.length : 0} spots, ${data.skin_percentage}% skin.`, "ok");
 
   // Merge: fresh auto blobs + previously added manual/text blobs that survive
   const previousManual = currentBlobs.filter(b =>
@@ -918,7 +1119,7 @@ async function runAnalysis(isUserInitiated) {
   currentSkinMaskBlob = null;
   if (data.skin_mask_base64) {
     currentSkinMaskBlob = dataUrlToBlob(data.skin_mask_base64);
-    currentSkinMaskImage = await loadImage(data.skin_mask_base64);
+    currentSkinMaskImage = await loadImage(data.skin_mask_base64, "img-skin-mask-holder");
   }
 
   resultImage = null;
@@ -926,7 +1127,9 @@ async function runAnalysis(isUserInitiated) {
   setLog(`Detected ${newAuto.length} spots (${data.skin_percentage}% skin) in ${data.process_time_ms}ms. Rendering result preview\u2026`, "success");
 
   // Immediately show the retouched look on the AFTER side
+  logDebug("[ANALYZE] Launching Before/After result preview...", "info");
   await runPreview();
+  logDebug("[ANALYZE] Ready for interactive editing!", "ok");
   return data;
 }
 
@@ -941,6 +1144,7 @@ btnAutoDetect.addEventListener("click", async () => {
   try {
     await runAnalysis(true);
   } catch (err) {
+    logDebug(`[ANALYZE ERROR] ${err.stack || err.message || err}`, "error");
     console.error("Analyze error:", err);
     setPreviewStatus("error");
     setLog(err.message, "error");
@@ -964,6 +1168,7 @@ function scheduleReanalyze(delay = 1200) {
     try {
       await runAnalysis(false);
     } catch (err) {
+      logDebug(`[RE-ANALYZE ERROR] ${err.message || err}`, "error");
       setPreviewStatus("error");
       setLog(err.message, "error");
     } finally {
@@ -974,6 +1179,114 @@ function scheduleReanalyze(delay = 1200) {
 }
 
 /* ============================== CONTROL WIRING ============================== */
+function setupAccordion(btnId, drawerId) {
+  const btn = document.getElementById(btnId);
+  const drawer = document.getElementById(drawerId);
+  if (btn && drawer) {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      drawer.classList.toggle("open");
+    });
+  }
+}
+
+setupAccordion("btn-toggle-prompt", "drawer-prompt");
+setupAccordion("btn-toggle-training", "drawer-training");
+setupAccordion("btn-toggle-fine-tuning", "drawer-fine-tuning");
+setupAccordion("btn-toggle-debug", "drawer-debug");
+
+/* Diagnostics Runner */
+async function runDiagnostics() {
+  logDebug("=== STARTING FULL SYSTEM DIAGNOSTICS ===", "info");
+  
+  // 1. Check Photoshop Environment
+  try {
+    const psVer = (app && app.version) ? app.version : "Unknown";
+    logDebug(`Photoshop Engine Version: ${psVer}`, "info");
+    const activeDoc = app.activeDocument;
+    if (activeDoc) {
+      logDebug(`Active Document: "${activeDoc.name || 'Untitled'}" (${activeDoc.width}x${activeDoc.height}px, ${activeDoc.mode})`, "ok");
+    } else {
+      logDebug("No document currently open in Photoshop. Please open an image first.", "warn");
+    }
+  } catch (e) {
+    logDebug(`Photoshop DOM check error: ${e.message}`, "error");
+  }
+
+  // 2. Check Backend Server Connection
+  const serverUrl = getServerUrl();
+  logDebug(`Testing server connection at: ${serverUrl}/health ...`, "info");
+  try {
+    const t0 = Date.now();
+    const res = await fetch(`${serverUrl}/health`, { method: "GET" });
+    const lat = Date.now() - t0;
+    if (res.ok) {
+      const info = await res.json();
+      logDebug(`Server 200 OK (${lat}ms): Model=${info.model}, Device=${info.device}, Ready=${info.status}`, "ok");
+    } else {
+      logDebug(`Server returned error status ${res.status}: ${await res.text()}`, "error");
+    }
+  } catch (netErr) {
+    logDebug(`Server connection FAILED (${serverUrl}): ${netErr.message || netErr}`, "error");
+  }
+
+  // 3. Test Snapshot Capture
+  if (app.activeDocument) {
+    logDebug("Testing document snapshot capture pipeline...", "info");
+    try {
+      const t0 = Date.now();
+      const blob = await exportFullPortrait();
+      const dt = Date.now() - t0;
+      logDebug(`Snapshot test SUCCESS in ${dt}ms: Captured ${(blob.size / 1024).toFixed(1)} KB image.`, "ok");
+    } catch (snapErr) {
+      logDebug(`Snapshot test FAILED: ${snapErr.message || snapErr}`, "error");
+    }
+  }
+
+  logDebug("=== DIAGNOSTICS COMPLETE ===", "info");
+}
+
+if (btnRunDiagnostics) {
+  btnRunDiagnostics.addEventListener("click", runDiagnostics);
+}
+
+if (btnCopyDebugLogs) {
+  btnCopyDebugLogs.addEventListener("click", async () => {
+    try {
+      const text = debugLogs.join("\n");
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+      }
+      setLog("Debug logs copied to clipboard!", "success");
+      logDebug("Debug logs copied to clipboard.", "ok");
+    } catch (e) {
+      logDebug(`Clipboard copy failed: ${e.message}`, "warn");
+    }
+  });
+}
+
+if (btnClearDebugLogs) {
+  btnClearDebugLogs.addEventListener("click", () => {
+    debugLogs.length = 0;
+    if (debugTerminal) {
+      debugTerminal.innerHTML = '<div class="debug-line info">[SYS] Logs cleared.</div>';
+    }
+  });
+}
+
+if (sliderTexture && valTexture) {
+  sliderTexture.addEventListener("input", () => {
+    valTexture.textContent = `${sliderTexture.value}%`;
+    schedulePreview(650);
+  });
+}
+if (sliderFeather && valFeather) {
+  sliderFeather.addEventListener("input", () => {
+    valFeather.textContent = `${sliderFeather.value}px`;
+    schedulePreview(650);
+  });
+}
+
 sliderGrain.addEventListener("input", () => {
   valGrain.textContent = `${sliderGrain.value}%`;
   schedulePreview(650);
