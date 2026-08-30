@@ -819,14 +819,6 @@ function scheduleReanalyze(delay = 1200) {
 }
 
 /* ============================== CONTROL WIRING ============================== */
-sliderTexture.addEventListener("input", () => {
-  valTexture.textContent = `${sliderTexture.value}%`;
-  schedulePreview(650);
-});
-sliderFeather.addEventListener("input", () => {
-  valFeather.textContent = `${sliderFeather.value}px`;
-  schedulePreview(650);
-});
 sliderGrain.addEventListener("input", () => {
   valGrain.textContent = `${sliderGrain.value}%`;
   schedulePreview(650);
@@ -845,10 +837,6 @@ sliderSmoothStrength.addEventListener("input", () => {
 });
 sliderTextureKeep.addEventListener("input", () => {
   valTextureKeep.textContent = `${sliderTextureKeep.value}%`;
-  schedulePreview(650);
-});
-sliderDbStrength.addEventListener("input", () => {
-  valDbStrength.textContent = `${sliderDbStrength.value}%`;
   schedulePreview(650);
 });
 sliderTeeth.addEventListener("input", () => {
