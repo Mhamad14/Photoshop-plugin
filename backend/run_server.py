@@ -3,6 +3,25 @@ import sys
 import socket
 import subprocess
 
+def disable_windows_quickedit():
+    """
+    Disables QuickEdit mode in Windows Command Prompt to prevent mouse clicks
+    from pausing/freezing the server execution (Windows 'Select' state).
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            h_stdin = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE = -10
+            mode = ctypes.c_ulong()
+            if kernel32.GetConsoleMode(h_stdin, ctypes.byref(mode)):
+                ENABLE_QUICK_EDIT_MODE = 0x0040
+                ENABLE_EXTENDED_FLAGS = 0x0080
+                new_mode = (mode.value & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS
+                kernel32.SetConsoleMode(h_stdin, new_mode)
+        except Exception:
+            pass
+
 def is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex((host, port)) == 0
@@ -18,6 +37,7 @@ def find_available_port(preferred_port: int = 8765, host: str = "127.0.0.1") -> 
     return preferred_port
 
 def main():
+    disable_windows_quickedit()
     print("=" * 60)
     print(" Starting AI Retouching Local Server (FastAPI + Simple-LaMa)")
     print("=" * 60)
