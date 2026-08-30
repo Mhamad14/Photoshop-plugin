@@ -56,20 +56,39 @@
         return newLayer;
     }
 
+    function importLayerFromFile(file, layerName, opacityVal) {
+        if (!file || !file.exists || file.length < 300) {
+            return null;
+        }
+        var doc = app.activeDocument;
+        var origRuler = app.preferences.rulerUnits;
+        try { app.preferences.rulerUnits = Units.PIXELS; } catch (e) {}
+
+        var tempDoc = app.open(file);
+        var importedLayer = tempDoc.activeLayer.duplicate(doc, ElementPlacement.PLACEATBEGINNING);
+        tempDoc.close(SaveOptions.DONOTSAVECHANGES);
+
+        try { app.preferences.rulerUnits = origRuler; } catch (e) {}
+
+        doc.activeLayer = importedLayer;
+        if (layerName) importedLayer.name = layerName;
+        if (opacityVal !== undefined && opacityVal !== null) importedLayer.opacity = opacityVal;
+        return importedLayer;
+    }
+
     function placeFile(file) {
-        var desc = new ActionDescriptor();
-        desc.putPath(charIDToTypeID("null"), file);
-        desc.putEnumerated(charIDToTypeID("FTcs"), charIDToTypeID("QCSt"), charIDToTypeID("Qcsa"));
-        var offsetDesc = new ActionDescriptor();
-        offsetDesc.putUnitDouble(charIDToTypeID("Hrzn"), charIDToTypeID("#Pxl"), 0.0);
-        offsetDesc.putUnitDouble(charIDToTypeID("Vrtc"), charIDToTypeID("#Pxl"), 0.0);
-        desc.putObject(charIDToTypeID("Ofst"), charIDToTypeID("Ofst"), offsetDesc);
-        executeAction(charIDToTypeID("Plc "), desc, DialogModes.NO);
+        return importLayerFromFile(file, null, 100);
     }
 
     function executeHeal(pad, textureBlend, featherRadius, grainIntensity, hideMask) {
         if (app.documents.length === 0) {
             alert("Please open a photo first.", "AI Retouch");
+            return false;
+        }
+
+        var hCheck = checkBackendHealth();
+        if (!hCheck.online) {
+            alert("AI Retouch backend server is offline!\n\nPlease start the server by double-clicking:\nbackend\\run_server.bat\n\nOnce the server console is ready, retry.", "AI Server Offline");
             return false;
         }
 
@@ -121,6 +140,12 @@
         if (imageCropFile.exists) imageCropFile.remove();
 
         var dupImageDoc = doc.duplicate("AI_Temp_Image", false);
+        try { dupImageDoc.selection.deselect(); } catch (e) {}
+        try {
+            if (dupImageDoc.bitsPerChannel !== BitsPerChannelType.EIGHT) {
+                dupImageDoc.bitsPerChannel = BitsPerChannelType.EIGHT;
+            }
+        } catch (e) {}
         dupImageDoc.selection.select(cropBox);
         dupImageDoc.crop(dupImageDoc.selection.bounds);
         dupImageDoc.flatten();
@@ -142,6 +167,12 @@
         if (maskCropFile.exists) maskCropFile.remove();
 
         var dupMaskDoc = doc.duplicate("AI_Temp_Mask", false);
+        try { dupMaskDoc.selection.deselect(); } catch (e) {}
+        try {
+            if (dupMaskDoc.bitsPerChannel !== BitsPerChannelType.EIGHT) {
+                dupMaskDoc.bitsPerChannel = BitsPerChannelType.EIGHT;
+            }
+        } catch (e) {}
         dupMaskDoc.selection.select(cropBox);
         dupMaskDoc.crop(dupMaskDoc.selection.bounds);
         dupMaskDoc.flatten();
@@ -158,13 +189,17 @@
         var healedFile = new File(tempFolder.fsName + "/healed_patch.png");
         if (healedFile.exists) healedFile.remove();
 
-        var cmd = 'curl.exe -s -X POST ' +
-            '-F "image=@' + imageCropFile.fsName + '" ' +
-            '-F "mask=@' + maskCropFile.fsName + '" ' +
+        var imgPath = imageCropFile.fsName.replace(/\\/g, "/");
+        var mskPath = maskCropFile.fsName.replace(/\\/g, "/");
+        var outPath = healedFile.fsName.replace(/\\/g, "/");
+
+        var cmd = 'curl.exe -s -S --tcp-nodelay -m 120 -X POST ' +
+            '-F "image=@' + imgPath + '" ' +
+            '-F "mask=@' + mskPath + '" ' +
             '-F "texture_blend=' + textureBlend + '" ' +
             '-F "feather_radius=' + featherRadius + '" ' +
             '-F "grain_intensity=' + grainIntensity + '" ' +
-            '-o "' + healedFile.fsName + '" ' +
+            '-o "' + outPath + '" ' +
             '"' + activeServerUrl + '/inpaint"';
 
         app.system(cmd);
@@ -174,10 +209,8 @@
             return false;
         }
 
-        placeFile(healedFile);
-
-        var placedLayer = doc.activeLayer;
-        placedLayer.name = "AI Healed Patch";
+        var placedLayer = importLayerFromFile(healedFile, "AI Healed Patch", 100);
+        if (!placedLayer) return false;
 
         var placedBounds = placedLayer.bounds;
         var pLeft = placedBounds[0].as("px");
@@ -190,33 +223,55 @@
         return true;
     }
 
-    // Modal Dialog Window
+    // -------------------------------------------------------------
+    // Modal Dialog Window (Dark Studio Design)
+    // -------------------------------------------------------------
     var dlg = new Window("dialog", "AI Retouch - Fast Spot Remover");
     dlg.orientation = "column";
     dlg.alignChildren = ["fill", "top"];
     dlg.spacing = 10;
-    dlg.margins = 16;
+    dlg.margins = 14;
 
-    // --- Status Panel ---
+    var cBg = [0.14, 0.14, 0.14, 1.0];        // #242424
+    var cPanel = [0.18, 0.18, 0.18, 1.0];     // #2E2E2E
+    var cTextPrimary = [0.95, 0.95, 0.95, 1.0];
+    var cTextMuted = [0.65, 0.65, 0.65, 1.0];
+    var cGreen = [0.25, 0.78, 0.40, 1.0];
+    var cRed = [0.85, 0.35, 0.35, 1.0];
+
+    try {
+        dlg.graphics.backgroundColor = dlg.graphics.newBrush(dlg.graphics.BrushType.SOLID_COLOR, cBg);
+    } catch (e) {}
+
+    // --- Header & Status ---
     var health = checkBackendHealth();
-    var pnlStatus = dlg.add("panel", undefined, "Backend Status");
-    pnlStatus.orientation = "row";
-    pnlStatus.alignChildren = ["left", "center"];
-    var statusTextVal = health.online ? "[Online] " + health.url.replace("http://127.0.0.1:", "Port ") : "[Offline] Start backend server";
-    var txtStatus = pnlStatus.add("statictext", undefined, statusTextVal);
-    txtStatus.preferredSize.width = 220;
-    var btnCheck = pnlStatus.add("button", undefined, "Check");
-    btnCheck.onClick = function () {
-        var h = checkBackendHealth();
-        txtStatus.text = h.online ? "[Online] " + h.url.replace("http://127.0.0.1:", "Port ") : "[Offline] Start backend server";
-    };
+    var pnlHeader = dlg.add("group");
+    pnlHeader.orientation = "row";
+    pnlHeader.alignChildren = ["fill", "center"];
+
+    var lblTitle = pnlHeader.add("statictext", undefined, "AI SPOT REMOVER");
+    try {
+        lblTitle.graphics.font = ScriptUI.newFont("Segoe UI", "BOLD", 12);
+        lblTitle.graphics.foregroundColor = dlg.graphics.newPen(dlg.graphics.PenType.SOLID_COLOR, cTextPrimary, 1);
+    } catch (e) {}
+
+    var statusTextVal = health.online ? "[ONLINE: " + health.url.replace("http://127.0.0.1:", "PORT ") + "]" : "[OFFLINE: START SERVER]";
+    var txtStatus = pnlHeader.add("statictext", undefined, statusTextVal);
+    txtStatus.alignment = ["right", "center"];
+    try {
+        txtStatus.graphics.font = ScriptUI.newFont("Segoe UI", "BOLD", 10);
+        txtStatus.graphics.foregroundColor = dlg.graphics.newPen(dlg.graphics.PenType.SOLID_COLOR, health.online ? cGreen : cRed, 1);
+    } catch (e) {}
 
     // --- Step 1 Panel ---
     var pnlStep1 = dlg.add("panel", undefined, "Step 1: Paint Mask");
     pnlStep1.orientation = "column";
     pnlStep1.alignChildren = ["fill", "top"];
+    pnlStep1.margins = 10;
+    try { pnlStep1.graphics.backgroundColor = pnlStep1.graphics.newBrush(pnlStep1.graphics.BrushType.SOLID_COLOR, cPanel); } catch (e) {}
+
     var btnNewMask = pnlStep1.add("button", undefined, "Create New Mask Layer");
-    btnNewMask.preferredSize.height = 30;
+    btnNewMask.preferredSize.height = 28;
     btnNewMask.onClick = function () {
         createMaskLayer();
     };
@@ -225,11 +280,14 @@
     var pnlStep2 = dlg.add("panel", undefined, "Step 2: AI Inpainting Parameters");
     pnlStep2.orientation = "column";
     pnlStep2.alignChildren = ["fill", "top"];
+    pnlStep2.margins = 10;
     pnlStep2.spacing = 6;
+    try { pnlStep2.graphics.backgroundColor = pnlStep2.graphics.newBrush(pnlStep2.graphics.BrushType.SOLID_COLOR, cPanel); } catch (e) {}
 
     var grpPad = pnlStep2.add("group");
     grpPad.orientation = "row";
-    grpPad.add("statictext", undefined, "Padding:");
+    var lblPadT = grpPad.add("statictext", undefined, "Padding Area:");
+    lblPadT.preferredSize.width = 110;
     var lblPad = grpPad.add("statictext", undefined, "20px");
     lblPad.preferredSize.width = 40;
     var sldPad = pnlStep2.add("slider", undefined, 20, 10, 60);
@@ -237,7 +295,8 @@
 
     var grpTex = pnlStep2.add("group");
     grpTex.orientation = "row";
-    grpTex.add("statictext", undefined, "Skin Texture:");
+    var lblTexT = grpTex.add("statictext", undefined, "Skin Texture:");
+    lblTexT.preferredSize.width = 110;
     var lblTex = grpTex.add("statictext", undefined, "25%");
     lblTex.preferredSize.width = 40;
     var sldTex = pnlStep2.add("slider", undefined, 25, 0, 100);
@@ -245,7 +304,8 @@
 
     var grpFea = pnlStep2.add("group");
     grpFea.orientation = "row";
-    grpFea.add("statictext", undefined, "Feather:");
+    var lblFeaT = grpFea.add("statictext", undefined, "Feather Radius:");
+    lblFeaT.preferredSize.width = 110;
     var lblFea = grpFea.add("statictext", undefined, "3px");
     lblFea.preferredSize.width = 40;
     var sldFea = pnlStep2.add("slider", undefined, 3, 0, 10);
@@ -253,9 +313,10 @@
 
     var chkHide = pnlStep2.add("checkbox", undefined, "Hide mask layer after healing");
     chkHide.value = true;
+    try { chkHide.graphics.foregroundColor = dlg.graphics.newPen(dlg.graphics.PenType.SOLID_COLOR, cTextPrimary, 1); } catch (e) {}
 
-    var btnHeal = dlg.add("button", undefined, "Heal Painted Blemishes");
-    btnHeal.preferredSize.height = 36;
+    var btnHeal = dlg.add("button", undefined, "EXECUTE AI SPOT INPAINTING");
+    btnHeal.preferredSize.height = 34;
     btnHeal.onClick = function () {
         var pad = Math.round(sldPad.value);
         var textureBlend = (Math.round(sldTex.value) / 100.0).toFixed(2);
@@ -272,7 +333,20 @@
         dlg.close();
     };
 
-    var btnClose = dlg.add("button", undefined, "Cancel");
+    var grpBottom = dlg.add("group");
+    grpBottom.orientation = "row";
+    grpBottom.alignChildren = ["right", "center"];
+
+    var btnCheck = grpBottom.add("button", undefined, "Check Server");
+    btnCheck.preferredSize = [100, 24];
+    btnCheck.onClick = function () {
+        var h = checkBackendHealth();
+        txtStatus.text = h.online ? "[ONLINE: " + h.url.replace("http://127.0.0.1:", "PORT ") + "]" : "[OFFLINE: START SERVER]";
+        try { txtStatus.graphics.foregroundColor = dlg.graphics.newPen(dlg.graphics.PenType.SOLID_COLOR, h.online ? cGreen : cRed, 1); } catch (e) {}
+    };
+
+    var btnClose = grpBottom.add("button", undefined, "Close");
+    btnClose.preferredSize = [80, 24];
     btnClose.onClick = function () { dlg.close(); };
 
     dlg.center();
