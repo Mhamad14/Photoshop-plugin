@@ -59,7 +59,13 @@
 
         <!-- Canvas Container -->
         <div class="canvas-wrapper" id="canvas-wrapper">
-          <canvas id="preview-canvas"></canvas>
+          <div class="preview-stage" id="preview-stage">
+            <img id="view-img-before" class="preview-img-base" alt="Before">
+            <div id="view-after-clip" class="preview-after-clip">
+              <img id="view-img-after" class="preview-img-overlay" alt="After">
+            </div>
+            <canvas id="preview-canvas"></canvas>
+          </div>
           <div id="canvas-empty-overlay" class="canvas-empty-state">
             <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
               <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>

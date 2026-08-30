@@ -17,6 +17,7 @@
       "label": {
         "default": "AI Blemish Remover"
       },
+      "main": "index.html",
       "minimumSize": {
         "width": 240,
         "height": 320
@@ -36,8 +37,7 @@
       "domains": "all"
     },
     "localFileSystem": "plugin",
-    "clipboard": "readAndWrite",
-    "allowCodeGenerationFromStrings": true
+    "clipboard": "readAndWrite"
   },
   "icons": [
     {

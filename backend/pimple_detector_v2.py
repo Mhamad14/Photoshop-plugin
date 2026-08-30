@@ -192,6 +192,13 @@ def detect_pimple_candidates(
     """
     h, w, _ = img_rgb.shape
     skin_binary = (skin_mask > 128).astype(np.uint8)
+
+    # Resolution-adaptive radius bounds: at high camera resolutions (4000px+)
+    # a real blemish spans 100px+, so fixed pixel caps would only mask the
+    # pimple core and leave its inflamed halo unhealed.
+    min_dim = float(min(h, w))
+    min_radius = max(min_radius, int(min_dim * 0.0015))
+    max_radius = max(max_radius, int(min_dim * 0.02))
     
     if np.sum(skin_binary) < 100:
         logger.warning("Skin mask is nearly empty. Detection skipped.")
@@ -209,7 +216,7 @@ def detect_pimple_candidates(
     std_val = float(np.std(skin_spots))
 
     # Dynamic k threshold scaling: sensitivity 0.1 (strict) to 1.0 (sensitive)
-    k = (1.0 - max(0.05, min(1.0, sensitivity))) * 3.0 + 0.45
+    k = (1.0 - max(0.05, min(1.0, sensitivity))) * 1.8 + 0.15
     threshold = mean_val + (k * std_val)
 
     candidate_mask = (spot_energy > threshold).astype(np.uint8) * 255
@@ -228,11 +235,11 @@ def detect_pimple_candidates(
         bh = int(stats[i, cv2.CC_STAT_HEIGHT])
         cx, cy = float(centroids[i][0]), float(centroids[i][1])
 
-        if bw == 0 or bh == 0 or area < 3:
+        if bw == 0 or bh == 0 or area < 2:
             continue
 
         aspect_ratio = float(bw) / float(bh)
-        if aspect_ratio < 0.28 or aspect_ratio > 3.4:
+        if aspect_ratio < 0.22 or aspect_ratio > 4.5:
             continue
 
         eff_radius = int(math.ceil(math.sqrt(area / math.pi)))
@@ -243,13 +250,13 @@ def detect_pimple_candidates(
         peak_val = float(np.max(blob_pixels)) if len(blob_pixels) > 0 else threshold
         conf = min(0.99, max(0.40, float((peak_val - threshold) / (std_val * 2.5 + 1e-5) * 0.45 + 0.55)))
 
-        pad = max(3, int(eff_radius * 0.35))
+        pad = max(3, int(eff_radius * 0.40))
         x1 = max(0, x - pad)
         y1 = max(0, y - pad)
         x2 = min(w, x + bw + pad)
         y2 = min(h, y + bh + pad)
 
-        radius_with_margin = eff_radius + max(2, int(eff_radius * 0.45))
+        radius_with_margin = eff_radius + max(3, int(eff_radius * 0.55))
 
         blob_data = {
             "id": blob_id,
@@ -268,7 +275,7 @@ def detect_pimple_candidates(
         blob_id += 1
 
     # Morphological cluster fusion on candidate mask
-    k_fuse = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    k_fuse = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_CLOSE, k_fuse)
 
     # Optional Stage D: Gemini Vision VLM Verification / Augmentation
@@ -327,10 +334,12 @@ def blobs_to_mask(blobs: List[Dict[str, Any]], shape: Tuple[int, int], dilate_px
         cx = int(round(blob.get("centroid", [blob.get("x", 0), blob.get("y", 0)])[0]))
         cy = int(round(blob.get("centroid", [blob.get("x", 0), blob.get("y", 0)])[1]))
         r = int(blob.get("radius", blob.get("r", 6)))
-        cv2.circle(mask, (cx, cy), r, 255, -1)
+        # Full Spot Healing Brush coverage (envelopes the complete inflamed redness margin)
+        expanded_r = max(4, int(r * 1.35) + 2)
+        cv2.circle(mask, (cx, cy), expanded_r, 255, -1)
 
     # Morphological Cluster Fusion: bridges close breakout spots so no patchy un-healed gaps remain
-    k_fuse = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    k_fuse = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_fuse)
 
     if dilate_px > 0:

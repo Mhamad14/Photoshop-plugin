@@ -1,4 +1,4 @@
-import base64
+﻿import base64
 import io
 import json
 import logging
@@ -24,6 +24,7 @@ from face_segmenter import segment_face_skin, get_bisenet_parser
 from pimple_detector_v2 import detect_pimple_candidates, blobs_to_mask, add_blob_at_point, toggle_blob_at_point
 from skin_toner import calculate_tone_lift, create_lightened_rgba_patch
 from skin_smoother import apply_full_smooth, create_smooth_rgba_patch
+from inpainter import inpaint_with_context_tiling
 from dodge_and_burn import generate_dodge_and_burn_map, create_dodge_and_burn_rgba_patch
 from eye_teeth_enhancer import enhance_eyes_and_teeth, create_eye_teeth_rgba_patch
 from shine_neutralizer import neutralize_skin_shine, create_shine_neutralizer_rgba_patch
@@ -215,87 +216,12 @@ def blend_skin_texture(
         # Seamlessly inject healthy pore structure into the inpainted core
         inpaint_f = inpaint_f + (healthy_annulus_texture * (texture_blend * 1.2) * mask_f)
 
-    # 3. Add sensor micro-grain matching
+    # 3. Add sensor micro-grain matching (subtle: 3% -> sigma ~2 levels)
     if grain_intensity > 0:
-        noise = np.random.normal(loc=0.0, scale=grain_intensity * 255.0, size=(h, w, c))
+        noise = np.random.normal(loc=0.0, scale=grain_intensity * 64.0, size=(h, w, c))
         inpaint_f = inpaint_f + (noise * mask_f)
 
     return np.clip(inpaint_f, 0, 255).astype(np.uint8)
-
-
-def inpaint_with_context_tiling(
-    model,
-    img_rgb: np.ndarray,
-    mask_gray: np.ndarray,
-    max_tile_size: int = 768,
-    context_pad: int = 80
-) -> np.ndarray:
-    """
-    Context-Aware Tiled Inpainting:
-    Runs Simple-LaMa at high resolution for blemish clusters with context margins,
-    preserving 100% native portrait sharpness without whole-canvas downscaling blur.
-    """
-    h, w, _ = img_rgb.shape
-    if model is None:
-        return img_rgb.copy()
-
-    # If entire image is reasonably sized, run direct inpainting
-    if max(h, w) <= max_tile_size:
-        pil_in = model(Image.fromarray(img_rgb), Image.fromarray(mask_gray))
-        if pil_in.size != (w, h):
-            pil_in = pil_in.resize((w, h), Image.Resampling.BILINEAR)
-        return np.array(pil_in)
-
-    # Find connected components of blemish mask
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats((mask_gray > 10).astype(np.uint8))
-    if num_labels <= 1:
-        return img_rgb.copy()
-
-    output_rgb = img_rgb.copy()
-
-    # Cluster nearby blemishes together
-    dilated_clusters = cv2.dilate((mask_gray > 10).astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_RECT, (context_pad, context_pad)))
-    c_num, c_labels, c_stats, _ = cv2.connectedComponentsWithStats(dilated_clusters)
-
-    for c in range(1, c_num):
-        bx = int(c_stats[c, cv2.CC_STAT_LEFT])
-        by = int(c_stats[c, cv2.CC_STAT_TOP])
-        bw = int(c_stats[c, cv2.CC_STAT_WIDTH])
-        bh = int(c_stats[c, cv2.CC_STAT_HEIGHT])
-
-        # Add context padding
-        x1 = max(0, bx - context_pad)
-        y1 = max(0, by - context_pad)
-        x2 = min(w, bx + bw + context_pad)
-        y2 = min(h, by + bh + context_pad)
-
-        crop_w = x2 - x1
-        crop_h = y2 - y1
-
-        crop_img = img_rgb[y1:y2, x1:x2]
-        crop_mask = mask_gray[y1:y2, x1:x2]
-
-        if np.sum(crop_mask > 0) == 0:
-            continue
-
-        # Inpaint localized crop
-        try:
-            crop_pil = model(Image.fromarray(crop_img), Image.fromarray(crop_mask))
-            if crop_pil.size != (crop_w, crop_h):
-                crop_pil = crop_pil.resize((crop_w, crop_h), Image.Resampling.BILINEAR)
-            crop_inpainted = np.array(crop_pil)
-        except Exception as e:
-            logger.warning(f"Tile inpainting exception on crop [{x1}:{x2}, {y1}:{y2}]: {e}")
-            continue
-
-        # Feathered blend into output
-        crop_alpha = cv2.GaussianBlur((crop_mask > 0).astype(np.float32), (7, 7), 0)[:, :, None]
-        output_rgb[y1:y2, x1:x2] = np.clip(
-            crop_inpainted.astype(np.float32) * crop_alpha + output_rgb[y1:y2, x1:x2].astype(np.float32) * (1.0 - crop_alpha),
-            0, 255
-        ).astype(np.uint8)
-
-    return output_rgb
 
 
 def apply_feather(mask_gray: np.ndarray, feather_radius: int = 3) -> np.ndarray:
@@ -610,40 +536,18 @@ async def preview_result(
             healed_pixels = int(np.sum(pimple_mask > 0))
 
             if healed_pixels > 0:
-                if heal_mode == "calm_redness":
-                    final_rgb = neutralize_erythema(current_rgb, pimple_mask)
-                elif heal_mode == "flatten_bump":
-                    clean_rgb = neutralize_erythema(current_rgb, pimple_mask)
-                    orig_f = current_rgb.astype(np.float32)
-                    blurred_low = cv2.GaussianBlur(orig_f, (15, 15), 0)
-                    high_freq = orig_f - blurred_low
-                    clean_f = clean_rgb.astype(np.float32)
-                    mask_f = (pimple_mask.astype(np.float32) / 255.0)[:, :, None]
-                    final_rgb = np.clip(clean_f + high_freq * (1.0 - mask_f * 0.7), 0, 255).astype(np.uint8)
-                else:
-                    if lama_model is None:
-                        raise HTTPException(status_code=503, detail="AI inpainting model is not loaded.")
-                    inpainted_np = inpaint_with_context_tiling(
-                        model=lama_model,
-                        img_rgb=current_rgb,
-                        mask_gray=pimple_mask,
-                        max_tile_size=768,
-                        context_pad=50
-                    )
-                    final_rgb = blend_skin_texture(
-                        original_img=current_rgb,
-                        inpainted_img=inpainted_np,
-                        mask_gray=pimple_mask,
-                        texture_blend=max(0.0, min(1.0, texture_blend)),
-                        grain_intensity=max(0.0, min(0.2, grain_intensity))
-                    )
-
-                feathered_alpha = apply_feather(pimple_mask, feather_radius=max(1, feather_radius))
-                alpha_f = (feathered_alpha.astype(np.float32) / 255.0)[:, :, None]
-                current_rgb = np.clip(
-                    final_rgb.astype(np.float32) * alpha_f + current_rgb.astype(np.float32) * (1.0 - alpha_f),
-                    0, 255
-                ).astype(np.uint8)
+                from spot_healer import spot_healing_brush_inpaint
+                healed_composite, _ = spot_healing_brush_inpaint(
+                    img_rgb=current_rgb,
+                    blobs=scaled_blobs,
+                    lama_model=lama_model,
+                    heal_mode=heal_mode,
+                    texture_blend=max(0.0, min(1.0, texture_blend)),
+                    dilate_px=3,
+                    feather_radius=max(1, feather_radius),
+                    grain_intensity=max(0.0, min(0.2, grain_intensity))
+                )
+                current_rgb = healed_composite
 
     # --- Action 2: AI Dodge & Burn micro-contrast ---
     if include_db and mask_np is not None:
@@ -826,6 +730,29 @@ async def refine_text(
 
     w, h = pil_image.size
 
+    p_lower = prompt.strip().lower()
+    
+    # 1. Local Instant Keyword Routing (works 100% offline without API key)
+    if any(kw in p_lower for kw in ["clear all", "deselect all", "remove all", "uncheck all", "none"]):
+        for b in existing_blobs:
+            b["active"] = False
+        return {"action": "remove_all", "blobs": existing_blobs, "count": len(existing_blobs)}
+        
+    if any(kw in p_lower for kw in ["select all", "enable all", "check all", "heal all", "all"]):
+        for b in existing_blobs:
+            b["active"] = True
+        return {"action": "add_all", "blobs": existing_blobs, "count": len(existing_blobs)}
+
+    if any(kw in p_lower for kw in ["forehead", "top"]):
+        for b in existing_blobs:
+            b["active"] = (b["centroid"][1] < (h * 0.38))
+        return {"action": "forehead_only", "blobs": existing_blobs, "count": len(existing_blobs)}
+
+    if any(kw in p_lower for kw in ["chin", "bottom", "jaw"]):
+        for b in existing_blobs:
+            b["active"] = (b["centroid"][1] > (h * 0.65))
+        return {"action": "chin_only", "blobs": existing_blobs, "count": len(existing_blobs)}
+
     try:
         from google import genai
         from google.genai import types
@@ -850,17 +777,35 @@ Output JSON schema:
   ]
 }}
 """
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[
-                types.Part.from_bytes(data=img_buf.getvalue(), mime_type="image/jpeg"),
-                sys_prompt
-            ],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1
-            )
-        )
+        response = None
+        last_err = None
+        for candidate_model in ["gemini-3.6-flash", "gemini-2.0-flash-exp", "gemini-2.0-flash", "gemini-1.5-flash"]:
+            try:
+                response = client.models.generate_content(
+                    model=candidate_model,
+                    contents=[
+                        types.Part.from_bytes(data=img_buf.getvalue(), mime_type="image/jpeg"),
+                        sys_prompt
+                    ],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.1
+                    )
+                )
+                if response and response.text:
+                    break
+            except Exception as model_err:
+                last_err = model_err
+                err_str = str(model_err)
+                if "leaked" in err_str.lower() or "permission_denied" in err_str.lower():
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Your Gemini API key was reported as leaked/revoked by Google. Please generate a new key at aistudio.google.com/app/apikey and save it in Settings."
+                    )
+                logger.warning(f"Candidate model {candidate_model} failed: {model_err}")
+
+        if response is None or not response.text:
+            raise last_err or Exception("All Gemini models failed to generate a response.")
 
         res_data = json.loads(response.text)
         action_intent = res_data.get("action", "add")
@@ -1010,7 +955,7 @@ async def apply_heal(
     if blobs_json:
         try:
             blobs = json.loads(blobs_json)
-            mask_np = blobs_to_mask(blobs, (h, w), dilate_px=0)
+            mask_np = blobs_to_mask(blobs, (h, w), dilate_px=3)
         except Exception as e:
             logger.warning(f"Failed to parse blobs_json: {e}")
             mask_np = np.zeros((h, w), dtype=np.uint8)
@@ -1034,50 +979,22 @@ async def apply_heal(
         transparent_empty.save(out_buf, format="PNG")
         return Response(content=out_buf.getvalue(), media_type="image/png", headers={"X-Healed-Pixels": "0"})
 
-    # 1. Pre-process / Neutralize erythema & dark craters
-    clean_rgb = neutralize_erythema(img_rgb, mask_np)
+    from spot_healer import spot_healing_brush_inpaint
+    healed_rgb, feathered_alpha = spot_healing_brush_inpaint(
+        img_rgb=img_rgb,
+        blobs=blobs if blobs_json else [],
+        lama_model=lama_model,
+        heal_mode=heal_mode,
+        texture_blend=max(0.0, min(1.0, texture_blend)),
+        dilate_px=4,
+        feather_radius=max(1, feather_radius),
+        grain_intensity=max(0.0, min(0.2, grain_intensity))
+    )
 
-    if heal_mode == "calm_redness":
-        # Calming mode: neutralizes angry redness and inflammation to natural skin tone
-        final_rgb = clean_rgb
-    elif heal_mode == "flatten_bump":
-        # Frequency separation bump flattening
-        orig_f = img_rgb.astype(np.float32)
-        blurred_low = cv2.GaussianBlur(orig_f, (15, 15), 0)
-        high_freq = orig_f - blurred_low
-        # Neutralize low-frequency color & flatten high-frequency 3D bump
-        clean_f = clean_rgb.astype(np.float32)
-        mask_f = (mask_np.astype(np.float32) / 255.0)[:, :, None]
-        final_rgb = np.clip(clean_f + high_freq * (1.0 - mask_f * 0.7), 0, 255).astype(np.uint8)
-    else:
-        # Default Full AI Inpainting Mode
-        if lama_model is None:
-            raise HTTPException(status_code=503, detail="AI inpainting model is not loaded.")
-
-        inpainted_np = inpaint_with_context_tiling(
-            model=lama_model,
-            img_rgb=clean_rgb,
-            mask_gray=mask_np,
-            max_tile_size=768,
-            context_pad=80
-        )
-
-        # 3. Healthy pore texture synthesis & illumination gradient alignment
-        final_rgb = blend_skin_texture(
-            original_img=img_rgb,
-            inpainted_img=inpainted_np,
-            mask_gray=mask_np,
-            texture_blend=max(0.0, min(1.0, texture_blend)),
-            grain_intensity=max(0.0, min(0.2, grain_intensity))
-        )
-
-    # 4. Feather mask edges
-    feathered_alpha = apply_feather(mask_np, feather_radius=max(0, feather_radius))
-
-    # 5. Build transparent RGBA PNG
-    r = Image.fromarray(final_rgb[:, :, 0])
-    g = Image.fromarray(final_rgb[:, :, 1])
-    b = Image.fromarray(final_rgb[:, :, 2])
+    # 5. Build transparent RGBA PNG for non-destructive placement
+    r = Image.fromarray(healed_rgb[:, :, 0])
+    g = Image.fromarray(healed_rgb[:, :, 1])
+    b = Image.fromarray(healed_rgb[:, :, 2])
     a = Image.fromarray(feathered_alpha)
     rgba_result = Image.merge("RGBA", (r, g, b, a))
 

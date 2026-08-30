@@ -18,19 +18,19 @@ def even_redness(img_rgb: np.ndarray, skin_mask: np.ndarray, strength: float = 0
         return img_rgb
 
     h, w, _ = img_rgb.shape
-    skin_w = (skin_mask > 30).astype(np.float32)
-    if np.sum(skin_w) < 100:
+    skin_w = (skin_mask > 20).astype(np.float32)
+    if np.sum(skin_w) < 50:
         return img_rgb
 
     lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
     l_chan, a_chan, b_chan = cv2.split(lab)
 
-    sigma = max(10.0, min(h, w) / 20.0)
+    sigma = max(12.0, min(h, w) / 16.0)
     norm_w = cv2.GaussianBlur(skin_w, (0, 0), sigma) + 1e-5
     a_base = cv2.GaussianBlur(a_chan * skin_w, (0, 0), sigma) / norm_w
     b_base = cv2.GaussianBlur(b_chan * skin_w, (0, 0), sigma) / norm_w
 
-    factor = strength * skin_w  # only inside skin, scaled by requested strength
+    factor = (strength * 0.7) * (skin_w / 255.0 if np.max(skin_w) > 1 else skin_w)
     a_new = a_chan * (1.0 - factor) + a_base * factor
     b_new = b_chan * (1.0 - factor * 0.6) + b_base * (factor * 0.6)
 
@@ -59,22 +59,22 @@ def frequency_separation_smooth(
         feathered_alpha: uint8 HxW alpha for non-destructive patch placement
     """
     h, w, _ = img_rgb.shape
-    mask_binary = (skin_mask > 30).astype(np.uint8)
-    if np.sum(mask_binary) < 100:
+    mask_binary = (skin_mask > 20).astype(np.uint8)
+    if np.sum(mask_binary) < 50:
         return img_rgb.copy(), skin_mask.copy()
 
     img_f = img_rgb.astype(np.float32)
     dim = min(h, w)
     
     # Scale bilateral parameters dynamically based on portrait resolution
-    d_val = max(5, min(15, int(dim * 0.006) | 1))
-    sigma_space = max(5.0, min(25.0, dim * 0.008))
-    sigma_color = max(25.0, min(55.0, 30.0 + strength * 20.0))
+    d_val = max(9, min(25, int(dim * 0.015) | 1))
+    sigma_space = max(10.0, min(35.0, dim * 0.02))
+    sigma_color = max(40.0, min(90.0, 35.0 + strength * 45.0))
 
     # Edge-preserving base layer (bilateral filter preserves facial features, eyes, lips, jawline)
     base = cv2.bilateralFilter(img_rgb, d=d_val, sigmaColor=sigma_color, sigmaSpace=sigma_space)
-    if strength >= 0.45:
-        base = cv2.bilateralFilter(base, d=d_val, sigmaColor=sigma_color * 0.8, sigmaSpace=sigma_space * 0.8)
+    if strength >= 0.4:
+        base = cv2.bilateralFilter(base, d=d_val, sigmaColor=sigma_color * 0.85, sigmaSpace=sigma_space * 0.85)
     base_f = base.astype(np.float32)
 
     # 2. High-Frequency Detail Layer (Micro-Pores & Texture)
@@ -83,14 +83,14 @@ def frequency_separation_smooth(
     # High-frequency detail attenuation with skin pore texture recovery
     strength = max(0.0, min(1.0, strength))
     texture_keep = max(0.05, min(1.0, texture_keep))
-    detail_scale = 1.0 - strength * (1.0 - texture_keep)
+    detail_scale = 1.0 - strength * (1.0 - texture_keep * 0.7)
 
     smoothed = base_f + (detail * detail_scale)
     
     # Add subtle micro-pore preservation boost for high-end magazine finish
     if texture_keep > 0.2:
         gray_detail = cv2.cvtColor(np.abs(detail).clip(0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-        pore_mask = ((gray_detail > 3) & (gray_detail < 25)).astype(np.float32)[:, :, None]
+        pore_mask = ((gray_detail > 2) & (gray_detail < 30)).astype(np.float32)[:, :, None]
         smoothed = smoothed + (detail * pore_mask * (texture_keep * 0.25))
 
     smoothed = smoothed.clip(0, 255)

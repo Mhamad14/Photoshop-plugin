@@ -21,6 +21,9 @@ const detectBtnText = document.getElementById("detect-btn-text");
 const previewCanvas = document.getElementById("preview-canvas");
 const canvasWrapper = document.getElementById("canvas-wrapper");
 const canvasEmptyOverlay = document.getElementById("canvas-empty-overlay");
+const viewImgBefore = document.getElementById("view-img-before");
+const viewAfterClip = document.getElementById("view-after-clip");
+const viewImgAfter = document.getElementById("view-img-after");
 const previewStatusPill = document.getElementById("preview-status");
 const blobCounter = document.getElementById("blob-counter");
 const toneSwatch = document.getElementById("tone-swatch");
@@ -99,12 +102,19 @@ function logDebug(msg, type = "info") {
   const timeStr = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
   const formatted = `[${timeStr}] [${type.toUpperCase()}] ${msg}`;
   debugLogs.push(formatted);
+  if (debugLogs.length > 300) debugLogs.shift();
+
   if (debugTerminal) {
+    while (debugTerminal.childNodes.length > 50) {
+      debugTerminal.removeChild(debugTerminal.firstChild);
+    }
     const line = document.createElement("div");
     line.className = `debug-line ${type}`;
     line.textContent = formatted;
     debugTerminal.appendChild(line);
-    debugTerminal.scrollTop = debugTerminal.scrollHeight;
+    try {
+      debugTerminal.scrollTop = debugTerminal.scrollHeight;
+    } catch (e) {}
   }
   console.log(formatted);
 }
@@ -229,6 +239,8 @@ function loadImage(src, holderId = "img-portrait-holder") {
       container.appendChild(img);
     }
     let settled = false;
+    let pollInterval = null;
+    let timeoutId = null;
 
     function finish() {
       if (settled) return;
@@ -236,8 +248,8 @@ function loadImage(src, holderId = "img-portrait-holder") {
       const nh = img.naturalHeight || img.height;
       if (!nw || !nh || nw === 0 || nh === 0) return; // Wait for real pixel dimensions!
       settled = true;
-      clearInterval(pollInterval);
-      clearTimeout(timeoutId);
+      if (pollInterval) clearInterval(pollInterval);
+      if (timeoutId) clearTimeout(timeoutId);
       logDebug(`Image [${holderId}] decoded: ${nw}x${nh}px`, "ok");
       resolve(img);
     }
@@ -249,8 +261,8 @@ function loadImage(src, holderId = "img-portrait-holder") {
     img.onerror = (err) => {
       if (settled) return;
       settled = true;
-      clearInterval(pollInterval);
-      clearTimeout(timeoutId);
+      if (pollInterval) clearInterval(pollInterval);
+      if (timeoutId) clearTimeout(timeoutId);
       logDebug(`Image [${holderId}] decode error: ${err ? (err.message || err) : "unknown"}`, "error");
       reject(new Error("Image decode error: " + (err ? (err.message || err) : "unknown")));
     };
@@ -263,9 +275,9 @@ function loadImage(src, holderId = "img-portrait-holder") {
       if (settled) return;
     }
 
-    const pollInterval = setInterval(() => {
+    pollInterval = setInterval(() => {
       if (settled) {
-        clearInterval(pollInterval);
+        if (pollInterval) clearInterval(pollInterval);
         return;
       }
       if ((img.naturalWidth && img.naturalWidth > 0) || (img.width && img.width > 0)) {
@@ -273,8 +285,8 @@ function loadImage(src, holderId = "img-portrait-holder") {
       }
     }, 20);
 
-    const timeoutId = setTimeout(() => {
-      clearInterval(pollInterval);
+    timeoutId = setTimeout(() => {
+      if (pollInterval) clearInterval(pollInterval);
       if (!settled) {
         if ((img.naturalWidth && img.naturalWidth > 0) || (img.width && img.width > 0)) {
           finish();
@@ -426,125 +438,124 @@ function splitCanvasX() {
 function renderCanvas() {
   if (!currentPortraitImage) return;
   const ctx = previewCanvas.getContext("2d");
-  if (!ctx) return;
   const cw = previewCanvas.width;
   const ch = previewCanvas.height;
-  ctx.clearRect(0, 0, cw, ch);
+  if (ctx) ctx.clearRect(0, 0, cw, ch);
 
   const imgW = currentPortraitImage.naturalWidth || currentPortraitImage.width || 500;
   const imgH = currentPortraitImage.naturalHeight || currentPortraitImage.height || 500;
   const scale = Math.min(cw / imgW, ch / imgH);
-  const renderW = imgW * scale;
-  const renderH = imgH * scale;
-  const offX = (cw - renderW) / 2;
-  const offY = (ch - renderH) / 2;
+  const renderW = Math.round(imgW * scale);
+  const renderH = Math.round(imgH * scale);
+  const offX = Math.round((cw - renderW) / 2);
+  const offY = Math.round((ch - renderH) / 2);
   viewGeom = { scale, offX, offY, renderW, renderH };
 
-  // 1. BEFORE base
-  try {
-    ctx.drawImage(currentPortraitImage, offX, offY, renderW, renderH);
-  } catch (drawErr) {
-    logDebug(`ctx.drawImage BEFORE error: ${drawErr.message || drawErr}`, "warn");
+  // 1. Position BEFORE Base Image in DOM
+  if (viewImgBefore) {
+    if (viewImgBefore.src !== currentPortraitImage.src) {
+      viewImgBefore.src = currentPortraitImage.src;
+    }
+    viewImgBefore.style.display = "block";
+    viewImgBefore.style.left = `${offX}px`;
+    viewImgBefore.style.top = `${offY}px`;
+    viewImgBefore.style.width = `${renderW}px`;
+    viewImgBefore.style.height = `${renderH}px`;
   }
 
-  // 2. AFTER region
+  // 2. Position and Clip AFTER Image in DOM
   let overlayLimitX = cw;
   if (viewMode === "after") {
-    if (resultImage) {
-      try {
-        ctx.drawImage(resultImage, offX, offY, renderW, renderH);
-        overlayLimitX = -1;
-      } catch (drawErr) {
-        logDebug(`ctx.drawImage AFTER error: ${drawErr.message || drawErr}`, "warn");
+    overlayLimitX = -1;
+    if (viewAfterClip && viewImgAfter && resultImage) {
+      if (viewImgAfter.src !== resultImage.src) {
+        viewImgAfter.src = resultImage.src;
       }
+      viewAfterClip.style.display = "block";
+      viewAfterClip.style.left = `${offX}px`;
+      viewAfterClip.style.top = `${offY}px`;
+      viewAfterClip.style.width = `${renderW}px`;
+      viewAfterClip.style.height = `${renderH}px`;
+      viewImgAfter.style.left = "0px";
+      viewImgAfter.style.top = "0px";
+      viewImgAfter.style.width = `${renderW}px`;
+      viewImgAfter.style.height = `${renderH}px`;
     }
   } else if (viewMode === "split") {
     const splitX = splitCanvasX();
     overlayLimitX = splitX;
-    if (resultImage) {
-      try {
-        // Draw the right half using 9-parameter drawImage slice (sx, sy, sw, sh, dx, dy, dw, dh)
-        const relSplit = Math.max(0, Math.min(1, splitPos));
-        const resW = resultImage.naturalWidth || resultImage.width || imgW;
-        const resH = resultImage.naturalHeight || resultImage.height || imgH;
-        const srcX = resW * relSplit;
-        const srcW = resW * (1 - relSplit);
-        const dstX = offX + renderW * relSplit;
-        const dstW = renderW * (1 - relSplit);
-        if (srcW > 0 && dstW > 0) {
-          ctx.drawImage(resultImage, srcX, 0, srcW, resH, dstX, offY, dstW, renderH);
-        }
-      } catch (drawErr) {
-        logDebug(`ctx.drawImage SPLIT slice error: ${drawErr.message || drawErr}`, "warn");
+    if (viewAfterClip && viewImgAfter && resultImage) {
+      if (viewImgAfter.src !== resultImage.src) {
+        viewImgAfter.src = resultImage.src;
       }
+      const splitPx = Math.round(renderW * splitPos);
+      viewAfterClip.style.display = "block";
+      viewAfterClip.style.left = `${offX + splitPx}px`;
+      viewAfterClip.style.top = `${offY}px`;
+      viewAfterClip.style.width = `${Math.max(0, renderW - splitPx)}px`;
+      viewAfterClip.style.height = `${renderH}px`;
+      viewImgAfter.style.left = `${-splitPx}px`;
+      viewImgAfter.style.top = "0px";
+      viewImgAfter.style.width = `${renderW}px`;
+      viewImgAfter.style.height = `${renderH}px`;
+    } else if (viewAfterClip) {
+      viewAfterClip.style.display = "none";
     }
+  } else {
+    // Before mode only
+    if (viewAfterClip) viewAfterClip.style.display = "none";
   }
 
-  // 3. Detection overlays (drawn only on the BEFORE side)
-  if (overlayLimitX > 0) {
-    if (chkShowSkin && chkShowSkin.checked && currentSkinMaskImage) {
+  // 3. Draw Vector Elements on Top Canvas (circles, badges, divider line)
+  if (!ctx) return;
+
+  if (overlayLimitX > 0 && chkShowPimples && chkShowPimples.checked && currentBlobs.length > 0) {
+    for (const blob of currentBlobs) {
+      const bcx = blob.centroid[0] * scale + offX;
+      const bcy = blob.centroid[1] * scale + offY;
+      const br = Math.max(3, blob.radius * scale);
+      if (bcx > overlayLimitX + br) continue;
+
       try {
-        ctx.globalAlpha = 0.35;
-        if (viewMode === "split") {
-          const relSplit = Math.max(0, Math.min(1, splitPos));
-          const srcW = imgW * relSplit;
-          const dstW = renderW * relSplit;
-          if (srcW > 0 && dstW > 0) {
-            ctx.drawImage(currentSkinMaskImage, 0, 0, srcW, imgH, offX, offY, dstW, renderH);
-          }
+        if (blob.active !== false) {
+          ctx.beginPath();
+          ctx.arc(bcx, bcy, br + 2, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(244,63,94,0.22)";
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(bcx, bcy, br, 0, Math.PI * 2);
+          ctx.strokeStyle = "#f43f5e";
+          ctx.lineWidth = 1.6;
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(bcx, bcy, 1.4, 0, Math.PI * 2);
+          ctx.fillStyle = "#ffffff";
+          ctx.fill();
         } else {
-          ctx.drawImage(currentSkinMaskImage, offX, offY, renderW, renderH);
+          ctx.beginPath();
+          ctx.arc(bcx, bcy, br, 0, Math.PI * 2);
+          ctx.strokeStyle = "rgba(161,161,170,0.55)";
+          ctx.lineWidth = 1.1;
+          ctx.stroke();
         }
-        ctx.globalAlpha = 1.0;
-      } catch (skinErr) {
-        console.warn("Skin mask overlay draw fallback:", skinErr);
-      }
-    }
-
-    if (chkShowPimples && chkShowPimples.checked && currentBlobs.length > 0) {
-      for (const blob of currentBlobs) {
-        const bcx = blob.centroid[0] * scale + offX;
-        const bcy = blob.centroid[1] * scale + offY;
-        const br = Math.max(3, blob.radius * scale);
-        if (bcx > overlayLimitX + br) continue;
-
-        try {
-          if (blob.active !== false) {
-            ctx.beginPath();
-            ctx.arc(bcx, bcy, br + 2, 0, Math.PI * 2);
-            ctx.fillStyle = "rgba(244,63,94,0.22)";
-            ctx.fill();
-            ctx.beginPath();
-            ctx.arc(bcx, bcy, br, 0, Math.PI * 2);
-            ctx.strokeStyle = "#f43f5e";
-            ctx.lineWidth = 1.6;
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.arc(bcx, bcy, 1.4, 0, Math.PI * 2);
-            ctx.fillStyle = "#ffffff";
-            ctx.fill();
-          } else {
-            ctx.beginPath();
-            ctx.arc(bcx, bcy, br, 0, Math.PI * 2);
-            ctx.strokeStyle = "rgba(161,161,170,0.55)";
-            ctx.lineWidth = 1.1;
-            ctx.stroke();
-          }
-        } catch (blobDrawErr) {}
-      }
+      } catch (blobDrawErr) {}
     }
   }
 
-  // 4. Split UI chrome
+  // 4. Split UI Chrome
   if (viewMode === "split") {
     const splitX = splitCanvasX();
-    if (splitX > 52) drawChip(ctx, 8, 8, "BEFORE");
-    if (cw - splitX > 58 && resultImage) drawChip(ctx, cw - 8, 8, "AFTER", true);
+    if (splitX > 52) drawChip(ctx, offX + 8, offY + 8, "BEFORE");
+    if (cw - splitX > 58 && resultImage) drawChip(ctx, offX + renderW - 8, offY + 8, "AFTER", true);
     drawSplitDivider(ctx, splitX);
+  } else if (viewMode === "after") {
+    drawChip(ctx, offX + renderW - 8, offY + 8, "AFTER", true);
+  } else {
+    drawChip(ctx, offX + 8, offY + 8, "BEFORE");
   }
 
   const activeCount = currentBlobs.filter(b => b.active !== false).length;
-  blobCounter.textContent = `${activeCount} Spots`;
+  if (blobCounter) blobCounter.textContent = `${activeCount} Spots`;
 }
 
 /* ============================== VIEWPORT INTERACTION ============================== */
@@ -659,7 +670,7 @@ function handleToolClick(origX, origY, px, py) {
       : `Spot #${currentBlobs[hitIndex].id} ignored.`, "info");
   } else {
     const newId = currentBlobs.length > 0 ? Math.max(...currentBlobs.map(b => b.id)) + 1 : 1;
-    const radius = Math.max(8, Math.round(imgW / 240));
+    const radius = Math.max(8, Math.round(imgW / 140));
     currentBlobs.push({
       id: newId,
       centroid: [origX, origY],
@@ -866,38 +877,12 @@ async function placePatchAsLayer(pngBuffer, fileName, layerName) {
   }, { commandName: `Place ${layerName}` });
 }
 
-function createSkinAlphaMaskBlob() {
-  if (!currentSkinMaskImage) return null;
-
-  const maskCanvas = document.createElement("canvas");
-  const width = currentSkinMaskImage.naturalWidth || currentSkinMaskImage.width;
-  const height = currentSkinMaskImage.naturalHeight || currentSkinMaskImage.height;
-  maskCanvas.width = width;
-  maskCanvas.height = height;
-  const ctx = maskCanvas.getContext("2d");
-  ctx.drawImage(currentSkinMaskImage, 0, 0, width, height);
-
-  // Photoshop can load a placed layer's transparency as a selection. Convert
-  // the grayscale segmentation mask into white pixels with mask alpha.
-  const pixels = ctx.getImageData(0, 0, width, height);
-  for (let i = 0; i < pixels.data.length; i += 4) {
-    const alpha = pixels.data[i];
-    pixels.data[i] = 255;
-    pixels.data[i + 1] = 255;
-    pixels.data[i + 2] = 255;
-    pixels.data[i + 3] = alpha;
-  }
-  ctx.putImageData(pixels, 0, 0);
-  return dataUrlToBlob(maskCanvas.toDataURL("image/png"));
-}
-
 async function loadSkinSelection(targetLayerName = null) {
-  const maskBlob = createSkinAlphaMaskBlob();
-  if (!maskBlob) throw new Error("Analyze Portrait first so Photoshop can build the skin mask.");
+  if (!currentSkinMaskBlob) throw new Error("Analyze Portrait first so Photoshop can build the skin mask.");
 
   const tempFolder = await localFileSystem.getTemporaryFolder();
   const maskFile = await tempFolder.createFile("ai_skin_selection.png", { overwrite: true });
-  await maskFile.write(await maskBlob.arrayBuffer(), { format: uxp.storage.formats.binary });
+  await maskFile.write(await currentSkinMaskBlob.arrayBuffer(), { format: uxp.storage.formats.binary });
   const maskToken = localFileSystem.createSessionToken(maskFile);
 
   await core.executeAsModal(async () => {
@@ -1004,23 +989,36 @@ async function createMaskedToneLiftLayer() {
 
 async function groupRetouchLayers(groupName, layerNames) {
   if (!layerNames || layerNames.length < 2) return;
-  await core.executeAsModal(async () => {
-    await action.batchPlay([
-      {
+  try {
+    await core.executeAsModal(async () => {
+      const selectCommands = [];
+      selectCommands.push({
         _obj: "select",
-        _target: layerNames.map(n => ({ _ref: "layer", _enum: "name", _value: n })),
+        _target: [{ _ref: "layer", _enum: "name", _value: layerNames[0] }],
         makeVisible: false,
         _options: { dialogOptions: "dontDisplay" }
-      },
-      {
+      });
+      for (let i = 1; i < layerNames.length; i++) {
+        selectCommands.push({
+          _obj: "select",
+          _target: [{ _ref: "layer", _enum: "name", _value: layerNames[i] }],
+          selectionModifier: { _enum: "selectionModifierType", _value: "addToSelection" },
+          makeVisible: false,
+          _options: { dialogOptions: "dontDisplay" }
+        });
+      }
+      selectCommands.push({
         _obj: "make",
         _target: [{ _ref: "layerSection" }],
         from: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }],
         name: groupName,
         _options: { dialogOptions: "dontDisplay" }
-      }
-    ], {});
-  }, { commandName: `Group ${groupName}` });
+      });
+      await action.batchPlay(selectCommands, {});
+    }, { commandName: `Group ${groupName}` });
+  } catch (groupErr) {
+    logDebug(`Layer grouping note: ${groupErr.message || groupErr}`, "warn");
+  }
 }
 
 /* ============================== STEP 1: ANALYZE (Layers 1 + 2) ============================== */
@@ -1512,7 +1510,6 @@ btnApplyAll.addEventListener("click", async () => {
 
       const smoothBuffer = await (await smoothRes.blob()).arrayBuffer();
       await placePatchAsLayer(smoothBuffer, "smoothed_layer.png", "AI Smoothed Skin");
-      await attachSkinLayerMask("AI Smoothed Skin");
       placedNames.push("AI Smoothed Skin");
     }
 
@@ -1558,7 +1555,6 @@ btnApplyAll.addEventListener("click", async () => {
       if (shineRes.ok) {
         const shineBuffer = await (await shineRes.blob()).arrayBuffer();
         await placePatchAsLayer(shineBuffer, "anti_shine_layer.png", "AI Anti-Glare Shine");
-        await attachSkinLayerMask("AI Anti-Glare Shine");
         placedNames.push("AI Anti-Glare Shine");
       }
     }
