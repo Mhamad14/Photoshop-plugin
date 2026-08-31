@@ -1,4 +1,4 @@
-﻿import base64
+import base64
 import io
 import json
 import logging
@@ -203,17 +203,32 @@ def neutralize_erythema(img_rgb: np.ndarray, mask_gray: np.ndarray) -> np.ndarra
     k_ery = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     dilated_mask = cv2.dilate(mask_gray, k_ery)
 
-    skin_weight = (dilated_mask == 0).astype(np.float32)
+    # Valid skin filter: avoid pure white background (>248) and dark shadows (<25)
+    valid_skin = (l_c > 25.0) & (l_c < 248.0)
+    skin_weight = ((dilated_mask == 0) & valid_skin).astype(np.float32)
 
-    # Compute healthy surrounding skin chromatic baseline
-    sigma = max(15.0, min(img_rgb.shape[:2]) * 0.08)
-    norm_w = cv2.GaussianBlur(skin_weight, (0, 0), sigma) + 1e-5
-    healthy_a = cv2.GaussianBlur(a_c * skin_weight, (0, 0), sigma) / norm_w
-    healthy_b = cv2.GaussianBlur(b_c * skin_weight, (0, 0), sigma) / norm_w
+    # Compute healthy surrounding skin chromatic baseline with local kernel
+    sigma = max(8.0, min(img_rgb.shape[:2]) * 0.025)
+    norm_w = cv2.GaussianBlur(skin_weight, (0, 0), sigma)
+    blurred_a = cv2.GaussianBlur(a_c * skin_weight, (0, 0), sigma)
+    blurred_b = cv2.GaussianBlur(b_c * skin_weight, (0, 0), sigma)
+
+    healthy_a = np.where(norm_w > 1e-3, blurred_a / (norm_w + 1e-6), a_c)
+    healthy_b = np.where(norm_w > 1e-3, blurred_b / (norm_w + 1e-6), b_c)
+
+    healthy_a = np.clip(healthy_a, 134.0, 175.0)
+    healthy_b = np.clip(healthy_b, 132.0, 180.0)
 
     mask_factor = (dilated_mask.astype(np.float32) / 255.0)
-    a_corrected = a_c * (1.0 - mask_factor * 0.85) + healthy_a * (mask_factor * 0.85)
-    b_corrected = b_c * (1.0 - mask_factor * 0.60) + healthy_b * (mask_factor * 0.60)
+    support = np.clip(norm_w / 0.08, 0.0, 1.0)
+    
+    excess_a = np.maximum(0.0, a_c - healthy_a)
+    a_corrected = a_c - (excess_a * mask_factor * support * 0.80)
+    b_corrected = b_c - ((b_c - healthy_b) * mask_factor * support * 0.30)
+
+    # Warmth floor: skin must never become gray
+    a_corrected = np.maximum(a_corrected, 132.0)
+    b_corrected = np.maximum(b_corrected, 130.0)
 
     # Merge and return corrected LAB
     lab_clean = cv2.merge([l_c, a_corrected, b_corrected]).clip(0, 255).astype(np.uint8)
@@ -330,8 +345,24 @@ async def analyze_portrait(
                 preserve_freckles=preserve_freckles
             )
 
-    # Encode skin mask to PNG base64 for fast HTML canvas preview
-    skin_pil = Image.fromarray(skin_mask)
+    # Generate compact optimized preview JPEG of the portrait for fast UI rendering
+    prev_scale = min(1.0, 960.0 / float(max(w, h)))
+    prev_w = max(1, int(w * prev_scale))
+    prev_h = max(1, int(h * prev_scale))
+    prev_pil = pil_image.resize((prev_w, prev_h), Image.Resampling.BILINEAR) if prev_scale < 1.0 else pil_image
+    prev_buf = io.BytesIO()
+    prev_pil.save(prev_buf, format="JPEG", quality=85, optimize=True)
+    prev_b64 = "data:image/jpeg;base64," + base64.b64encode(prev_buf.getvalue()).decode("ascii")
+
+    # Encode skin mask as true RGBA PNG with alpha channel
+    # This gives Photoshop a valid transparencyEnum channel (prevents Program Error)
+    # and allows transparent UI preview overlay
+    skin_rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    skin_rgba[:, :, 0] = 59   # Blue tint R
+    skin_rgba[:, :, 1] = 130  # Blue tint G
+    skin_rgba[:, :, 2] = 246  # Blue tint B
+    skin_rgba[:, :, 3] = skin_mask
+    skin_pil = Image.fromarray(skin_rgba, mode="RGBA")
     skin_buf = io.BytesIO()
     skin_pil.save(skin_buf, format="PNG", optimize=True)
     skin_b64 = "data:image/png;base64," + base64.b64encode(skin_buf.getvalue()).decode("ascii")
@@ -342,6 +373,7 @@ async def analyze_portrait(
     return JSONResponse({
         "status": "success",
         "image_size": [w, h],
+        "preview_base64": prev_b64,
         "skin_mask_base64": skin_b64,
         "skin_percentage": round(skin_meta["skin_percentage"], 1),
         "skin_pixel_count": skin_meta["skin_pixel_count"],
@@ -756,13 +788,8 @@ async def refine_text(
 ):
     """
     Layer 4 Refinement via Natural Language text grounding.
-    Sends image + prompt to Gemini Vision to locate bounding region and update blob list.
+    Supports smart offline commands and Gemini Vision VLM for open-ended instructions.
     """
-    cfg = load_config()
-    api_key = (gemini_api_key or "").strip() or cfg.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=400, detail="Gemini API Key is required for text refinement instructions.")
-
     try:
         existing_blobs = json.loads(blobs_json)
         image_bytes = await image.read()
@@ -771,29 +798,62 @@ async def refine_text(
         raise HTTPException(status_code=400, detail=f"Invalid request data: {e}")
 
     w, h = pil_image.size
-
     p_lower = prompt.strip().lower()
-    
-    # 1. Local Instant Keyword Routing (works 100% offline without API key)
-    if any(kw in p_lower for kw in ["clear all", "deselect all", "remove all", "uncheck all", "none"]):
+
+    # 1. Local Instant Smart Routing (Works 100% offline without API key)
+    if any(kw in p_lower for kw in ["clear all", "deselect all", "remove all", "uncheck all", "hide all", "none"]):
         for b in existing_blobs:
             b["active"] = False
-        return {"action": "remove_all", "blobs": existing_blobs, "count": len(existing_blobs)}
-        
-    if any(kw in p_lower for kw in ["select all", "enable all", "check all", "heal all", "all"]):
+        return {"status": "success", "action": "remove_all", "blobs": existing_blobs, "count": len(existing_blobs)}
+
+    if any(kw in p_lower for kw in ["select all", "enable all", "check all", "heal all", "show all", "all"]):
         for b in existing_blobs:
             b["active"] = True
-        return {"action": "add_all", "blobs": existing_blobs, "count": len(existing_blobs)}
+        return {"status": "success", "action": "add_all", "blobs": existing_blobs, "count": len(existing_blobs)}
 
-    if any(kw in p_lower for kw in ["forehead", "top"]):
+    if any(kw in p_lower for kw in ["beauty mark", "mole", "freckle", "birthmark", "keep mark"]):
+        # Preserve moles & beauty marks by deactivating them
+        for b in existing_blobs:
+            lbl = (b.get("label") or "").lower()
+            if "mole" in lbl or "mark" in lbl or b.get("is_mole", False):
+                b["active"] = False
+            elif b.get("radius", 6) <= 6 and b.get("confidence", 0.5) > 0.6:
+                # Small concentrated focal marks often correspond to moles / beauty marks
+                b["active"] = False
+        return {"status": "success", "action": "preserve_beauty_marks", "blobs": existing_blobs, "count": len(existing_blobs)}
+
+    if any(kw in p_lower for kw in ["forehead only", "only forehead", "just forehead", "top only"]):
         for b in existing_blobs:
             b["active"] = (b["centroid"][1] < (h * 0.38))
-        return {"action": "forehead_only", "blobs": existing_blobs, "count": len(existing_blobs)}
+        return {"status": "success", "action": "forehead_only", "blobs": existing_blobs, "count": len(existing_blobs)}
 
-    if any(kw in p_lower for kw in ["chin", "bottom", "jaw"]):
+    if any(kw in p_lower for kw in ["cheek", "cheeks only", "only cheek", "just cheek"]):
+        for b in existing_blobs:
+            b["active"] = ((b["centroid"][1] >= (h * 0.35)) and (b["centroid"][1] <= (h * 0.72)))
+        return {"status": "success", "action": "cheeks_only", "blobs": existing_blobs, "count": len(existing_blobs)}
+
+    if any(kw in p_lower for kw in ["chin only", "only chin", "jaw only", "only jaw", "bottom only", "just chin"]):
         for b in existing_blobs:
             b["active"] = (b["centroid"][1] > (h * 0.65))
-        return {"action": "chin_only", "blobs": existing_blobs, "count": len(existing_blobs)}
+        return {"status": "success", "action": "chin_only", "blobs": existing_blobs, "count": len(existing_blobs)}
+
+    if any(kw in p_lower for kw in ["neck only", "only neck", "just neck", "throat"]):
+        for b in existing_blobs:
+            b["active"] = (b["centroid"][1] > (h * 0.78))
+        return {"status": "success", "action": "neck_only", "blobs": existing_blobs, "count": len(existing_blobs)}
+
+    # 2. Online Gemini Vision VLM for Open-Ended Spatial Instructions
+    cfg = load_config()
+    api_key = (gemini_api_key or "").strip() or cfg.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
+
+    if not api_key:
+        # Graceful guidance when no API key is available for arbitrary natural language queries
+        return JSONResponse({
+            "status": "info",
+            "action": "offline_supported",
+            "message": f"'{prompt}' received. Quick commands available offline: 'keep beauty marks', 'forehead only', 'cheeks only', 'chin only', 'select all', 'clear all'. For open-ended natural language descriptions, add a Gemini API Key in Settings.",
+            "blobs": existing_blobs
+        })
 
     try:
         from google import genai
@@ -821,7 +881,7 @@ Output JSON schema:
 """
         response = None
         last_err = None
-        for candidate_model in ["gemini-3.6-flash", "gemini-2.0-flash-exp", "gemini-2.0-flash", "gemini-1.5-flash"]:
+        for candidate_model in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
             try:
                 response = client.models.generate_content(
                     model=candidate_model,
@@ -842,7 +902,7 @@ Output JSON schema:
                 if "leaked" in err_str.lower() or "permission_denied" in err_str.lower():
                     raise HTTPException(
                         status_code=400,
-                        detail="Your Gemini API key was reported as leaked/revoked by Google. Please generate a new key at aistudio.google.com/app/apikey and save it in Settings."
+                        detail="Your Gemini API key was reported as invalid/revoked. Please check your key in Settings."
                     )
                 logger.warning(f"Candidate model {candidate_model} failed: {model_err}")
 

@@ -229,74 +229,34 @@ async function blobToDataUrl(blob) {
   return url;
 }
 
-function loadImage(src, holderId = "img-portrait-holder") {
-  return new Promise((resolve, reject) => {
+function loadImage(src, holderId = "view-img-before") {
+  return new Promise((resolve) => {
+    if (!src) return resolve(null);
     let img = document.getElementById(holderId);
     if (!img) {
-      const container = document.getElementById("image-loader-cache") || document.body;
-      img = document.createElement("img");
+      img = new Image();
       img.id = holderId;
-      container.appendChild(img);
+      document.body.appendChild(img);
     }
     let settled = false;
-    let pollInterval = null;
-    let timeoutId = null;
+    let timer = null;
 
     function finish() {
       if (settled) return;
-      const nw = img.naturalWidth || img.width;
-      const nh = img.naturalHeight || img.height;
-      if (!nw || !nh || nw === 0 || nh === 0) return; // Wait for real pixel dimensions!
       settled = true;
-      if (pollInterval) clearInterval(pollInterval);
-      if (timeoutId) clearTimeout(timeoutId);
-      logDebug(`Image [${holderId}] decoded: ${nw}x${nh}px`, "ok");
+      if (timer) clearTimeout(timer);
       resolve(img);
     }
 
-    img.onload = () => {
-      finish();
-    };
-
-    img.onerror = (err) => {
-      if (settled) return;
-      settled = true;
-      if (pollInterval) clearInterval(pollInterval);
-      if (timeoutId) clearTimeout(timeoutId);
-      logDebug(`Image [${holderId}] decode error: ${err ? (err.message || err) : "unknown"}`, "error");
-      reject(new Error("Image decode error: " + (err ? (err.message || err) : "unknown")));
-    };
+    img.onload = () => finish();
+    img.onerror = () => finish();
 
     img.src = src;
-
-    // Check if immediately decoded
-    if ((img.naturalWidth && img.naturalWidth > 0) || (img.width && img.width > 0)) {
+    if (img.complete && (img.naturalWidth > 0 || img.width > 0)) {
       finish();
-      if (settled) return;
+    } else {
+      timer = setTimeout(finish, 600);
     }
-
-    pollInterval = setInterval(() => {
-      if (settled) {
-        if (pollInterval) clearInterval(pollInterval);
-        return;
-      }
-      if ((img.naturalWidth && img.naturalWidth > 0) || (img.width && img.width > 0)) {
-        finish();
-      }
-    }, 20);
-
-    timeoutId = setTimeout(() => {
-      if (pollInterval) clearInterval(pollInterval);
-      if (!settled) {
-        if ((img.naturalWidth && img.naturalWidth > 0) || (img.width && img.width > 0)) {
-          finish();
-        } else {
-          settled = true;
-          logDebug(`Image [${holderId}] decoding timed out.`, "warn");
-          resolve(img);
-        }
-      }
-    }, 4000);
   });
 }
 
@@ -307,7 +267,6 @@ function dataUrlToBlob(dataUrl, mime = "image/png") {
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return new Blob([bytes], { type: mime });
 }
-
 /* ============================== SERVER STATUS ============================== */
 async function checkServerStatus() {
   const current = getServerUrl();
@@ -438,9 +397,11 @@ function splitCanvasX() {
 function renderCanvas() {
   if (!currentPortraitImage) return;
   const ctx = previewCanvas.getContext("2d");
+  if (!ctx) return;
+
   const cw = previewCanvas.width;
   const ch = previewCanvas.height;
-  if (ctx) ctx.clearRect(0, 0, cw, ch);
+  ctx.clearRect(0, 0, cw, ch);
 
   const imgW = currentPortraitImage.naturalWidth || currentPortraitImage.width || 500;
   const imgH = currentPortraitImage.naturalHeight || currentPortraitImage.height || 500;
@@ -451,12 +412,14 @@ function renderCanvas() {
   const offY = Math.round((ch - renderH) / 2);
   viewGeom = { scale, offX, offY, renderW, renderH };
 
-  // 1. Position BEFORE Base Image in DOM
-  if (viewImgBefore) {
-    if (viewImgBefore.src !== currentPortraitImage.src) {
-      viewImgBefore.src = currentPortraitImage.src;
+  // 1. Position BEFORE Base Image directly in DOM
+  if (viewImgBefore && currentPortraitImage) {
+    const src = currentPortraitImage.src || (typeof currentPortraitImage === "string" ? currentPortraitImage : null);
+    if (src && viewImgBefore.src !== src) {
+      viewImgBefore.src = src;
     }
     viewImgBefore.style.display = "block";
+    viewImgBefore.style.position = "absolute";
     viewImgBefore.style.left = `${offX}px`;
     viewImgBefore.style.top = `${offY}px`;
     viewImgBefore.style.width = `${renderW}px`;
@@ -465,35 +428,44 @@ function renderCanvas() {
 
   // 2. Position and Clip AFTER Image in DOM
   let overlayLimitX = cw;
+  const splitX = splitCanvasX();
+
   if (viewMode === "after") {
     overlayLimitX = -1;
     if (viewAfterClip && viewImgAfter && resultImage) {
-      if (viewImgAfter.src !== resultImage.src) {
-        viewImgAfter.src = resultImage.src;
+      const rsrc = resultImage.src || (typeof resultImage === "string" ? resultImage : null);
+      if (rsrc && viewImgAfter.src !== rsrc) {
+        viewImgAfter.src = rsrc;
       }
       viewAfterClip.style.display = "block";
+      viewAfterClip.style.position = "absolute";
       viewAfterClip.style.left = `${offX}px`;
       viewAfterClip.style.top = `${offY}px`;
       viewAfterClip.style.width = `${renderW}px`;
       viewAfterClip.style.height = `${renderH}px`;
+      viewImgAfter.style.position = "absolute";
       viewImgAfter.style.left = "0px";
       viewImgAfter.style.top = "0px";
       viewImgAfter.style.width = `${renderW}px`;
       viewImgAfter.style.height = `${renderH}px`;
+    } else if (viewAfterClip) {
+      viewAfterClip.style.display = "none";
     }
   } else if (viewMode === "split") {
-    const splitX = splitCanvasX();
     overlayLimitX = splitX;
     if (viewAfterClip && viewImgAfter && resultImage) {
-      if (viewImgAfter.src !== resultImage.src) {
-        viewImgAfter.src = resultImage.src;
+      const rsrc = resultImage.src || (typeof resultImage === "string" ? resultImage : null);
+      if (rsrc && viewImgAfter.src !== rsrc) {
+        viewImgAfter.src = rsrc;
       }
-      const splitPx = Math.round(renderW * splitPos);
+      const splitPx = Math.max(0, Math.min(renderW, Math.round(renderW * splitPos)));
       viewAfterClip.style.display = "block";
+      viewAfterClip.style.position = "absolute";
       viewAfterClip.style.left = `${offX + splitPx}px`;
       viewAfterClip.style.top = `${offY}px`;
       viewAfterClip.style.width = `${Math.max(0, renderW - splitPx)}px`;
       viewAfterClip.style.height = `${renderH}px`;
+      viewImgAfter.style.position = "absolute";
       viewImgAfter.style.left = `${-splitPx}px`;
       viewImgAfter.style.top = "0px";
       viewImgAfter.style.width = `${renderW}px`;
@@ -506,8 +478,25 @@ function renderCanvas() {
     if (viewAfterClip) viewAfterClip.style.display = "none";
   }
 
-  // 3. Draw Vector Elements on Top Canvas (circles, badges, divider line)
-  if (!ctx) return;
+  // 3. Complementary canvas drawing (if supported by UXP version)
+  try {
+    ctx.drawImage(currentPortraitImage, offX, offY, renderW, renderH);
+    if (viewMode === "after" && resultImage) {
+      ctx.drawImage(resultImage, offX, offY, renderW, renderH);
+    } else if (viewMode === "split" && resultImage) {
+      ctx.save();
+      ctx.beginPath();
+      const clipX = Math.max(offX, Math.min(offX + renderW, splitX));
+      const clipW = Math.max(0, (offX + renderW) - clipX);
+      ctx.rect(clipX, offY, clipW, renderH);
+      ctx.clip();
+      ctx.drawImage(resultImage, offX, offY, renderW, renderH);
+      ctx.restore();
+    }
+  } catch (canvasDrawErr) {}
+
+  // 4. Draw Vector Blemish Highlight Circles
+  overlayLimitX = (viewMode === "after") ? -1 : (viewMode === "split" ? splitX : cw);
 
   if (overlayLimitX > 0 && chkShowPimples && chkShowPimples.checked && currentBlobs.length > 0) {
     for (const blob of currentBlobs) {
@@ -520,7 +509,7 @@ function renderCanvas() {
         if (blob.active !== false) {
           ctx.beginPath();
           ctx.arc(bcx, bcy, br + 2, 0, Math.PI * 2);
-          ctx.fillStyle = "rgba(244,63,94,0.22)";
+          ctx.fillStyle = "rgba(244,63,94,0.25)";
           ctx.fill();
           ctx.beginPath();
           ctx.arc(bcx, bcy, br, 0, Math.PI * 2);
@@ -528,13 +517,13 @@ function renderCanvas() {
           ctx.lineWidth = 1.6;
           ctx.stroke();
           ctx.beginPath();
-          ctx.arc(bcx, bcy, 1.4, 0, Math.PI * 2);
+          ctx.arc(bcx, bcy, 1.5, 0, Math.PI * 2);
           ctx.fillStyle = "#ffffff";
           ctx.fill();
         } else {
           ctx.beginPath();
           ctx.arc(bcx, bcy, br, 0, Math.PI * 2);
-          ctx.strokeStyle = "rgba(161,161,170,0.55)";
+          ctx.strokeStyle = "rgba(161,161,170,0.6)";
           ctx.lineWidth = 1.1;
           ctx.stroke();
         }
@@ -542,11 +531,10 @@ function renderCanvas() {
     }
   }
 
-  // 4. Split UI Chrome
+  // 5. Split UI Chrome & Badges
   if (viewMode === "split") {
-    const splitX = splitCanvasX();
-    if (splitX > 52) drawChip(ctx, offX + 8, offY + 8, "BEFORE");
-    if (cw - splitX > 58 && resultImage) drawChip(ctx, offX + renderW - 8, offY + 8, "AFTER", true);
+    if (splitX > offX + 52) drawChip(ctx, offX + 8, offY + 8, "BEFORE");
+    if ((offX + renderW) - splitX > 58 && resultImage) drawChip(ctx, offX + renderW - 8, offY + 8, "AFTER", true);
     drawSplitDivider(ctx, splitX);
   } else if (viewMode === "after") {
     drawChip(ctx, offX + renderW - 8, offY + 8, "AFTER", true);
@@ -763,7 +751,7 @@ async function runPreview() {
 
     const blob = await res.blob();
     const imgUrl = await blobToDataUrl(blob);
-    const img = await loadImage(imgUrl, "img-result-holder");
+    const img = await loadImage(imgUrl, "view-img-after");
     if (seq !== previewSeq) return; // a newer request superseded this one
 
     resultImage = img;
@@ -864,6 +852,7 @@ async function placePatchAsLayer(pngBuffer, fileName, layerName) {
   await patchFile.write(pngBuffer, { format: uxp.storage.formats.binary });
   const patchToken = localFileSystem.createSessionToken(patchFile);
 
+  let placedId = null;
   await core.executeAsModal(async () => {
     await action.batchPlay([
       {
@@ -872,9 +861,13 @@ async function placePatchAsLayer(pngBuffer, fileName, layerName) {
         _options: { dialogOptions: "dontDisplay" }
       }
     ], {});
-    const placed = app.activeDocument.activeLayers[0];
-    placed.name = layerName;
+    const active = app.activeDocument.activeLayers;
+    if (active && active.length > 0) {
+      active[0].name = layerName;
+      placedId = active[0].id;
+    }
   }, { commandName: `Place ${layerName}` });
+  return placedId;
 }
 
 async function loadSkinSelection(targetLayerName = null) {
@@ -886,33 +879,37 @@ async function loadSkinSelection(targetLayerName = null) {
   const maskToken = localFileSystem.createSessionToken(maskFile);
 
   await core.executeAsModal(async () => {
-    const commands = [
-      {
-        _obj: "placeEvent",
-        target: { _path: maskToken, _kind: "local" },
-        _options: { dialogOptions: "dontDisplay" }
-      },
-      {
-        _obj: "set",
-        _target: [{ _ref: "channel", _property: "selection" }],
-        to: { _ref: "channel", _enum: "channel", _value: "transparencyEnum" },
-        _options: { dialogOptions: "dontDisplay" }
-      },
-      {
-        _obj: "delete",
-        _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }],
-        _options: { dialogOptions: "dontDisplay" }
+    try {
+      const commands = [
+        {
+          _obj: "placeEvent",
+          target: { _path: maskToken, _kind: "local" },
+          _options: { dialogOptions: "dontDisplay" }
+        },
+        {
+          _obj: "set",
+          _target: [{ _ref: "channel", _property: "selection" }],
+          to: { _ref: "channel", _enum: "channel", _value: "transparencyEnum" },
+          _options: { dialogOptions: "dontDisplay" }
+        },
+        {
+          _obj: "delete",
+          _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }],
+          _options: { dialogOptions: "dontDisplay" }
+        }
+      ];
+      if (targetLayerName) {
+        commands.push({
+          _obj: "select",
+          _target: [{ _ref: "layer", _name: targetLayerName }],
+          makeVisible: false,
+          _options: { dialogOptions: "dontDisplay" }
+        });
       }
-    ];
-    if (targetLayerName) {
-      commands.push({
-        _obj: "select",
-        _target: [{ _ref: "layer", _enum: "name", _value: targetLayerName }],
-        makeVisible: false,
-        _options: { dialogOptions: "dontDisplay" }
-      });
+      await action.batchPlay(commands, {});
+    } catch (maskErr) {
+      logDebug(`Skin mask loading note: ${maskErr.message || maskErr}`, "warn");
     }
-    await action.batchPlay(commands, {});
   }, { commandName: "Load AI Skin Mask" });
 }
 
@@ -958,6 +955,7 @@ async function createMaskedToneLiftLayer() {
   await loadSkinSelection();
   const curve = buildToneLiftCurve();
 
+  let createdId = null;
   await core.executeAsModal(async () => {
     await action.batchPlay([
       {
@@ -984,28 +982,52 @@ async function createMaskedToneLiftLayer() {
         _options: { dialogOptions: "dontDisplay" }
       }
     ], {});
+    const active = app.activeDocument.activeLayers;
+    if (active && active.length > 0) createdId = active[0].id;
   }, { commandName: "Create AI Skin Tone Lift" });
+  return createdId;
 }
 
-async function groupRetouchLayers(groupName, layerNames) {
-  if (!layerNames || layerNames.length < 2) return;
+async function groupRetouchLayers(groupName, layerNames = [], layerIds = []) {
+  const validIds = (layerIds || []).filter(id => id != null);
+  const validNames = (layerNames || []).filter(n => Boolean(n));
+  if (validIds.length < 2 && validNames.length < 2) return;
+
   try {
     await core.executeAsModal(async () => {
       const selectCommands = [];
-      selectCommands.push({
-        _obj: "select",
-        _target: [{ _ref: "layer", _enum: "name", _value: layerNames[0] }],
-        makeVisible: false,
-        _options: { dialogOptions: "dontDisplay" }
-      });
-      for (let i = 1; i < layerNames.length; i++) {
+      if (validIds.length >= 2) {
         selectCommands.push({
           _obj: "select",
-          _target: [{ _ref: "layer", _enum: "name", _value: layerNames[i] }],
-          selectionModifier: { _enum: "selectionModifierType", _value: "addToSelection" },
+          _target: [{ _ref: "layer", _id: validIds[0] }],
           makeVisible: false,
           _options: { dialogOptions: "dontDisplay" }
         });
+        for (let i = 1; i < validIds.length; i++) {
+          selectCommands.push({
+            _obj: "select",
+            _target: [{ _ref: "layer", _id: validIds[i] }],
+            selectionModifier: { _enum: "selectionModifierType", _value: "addToSelection" },
+            makeVisible: false,
+            _options: { dialogOptions: "dontDisplay" }
+          });
+        }
+      } else {
+        selectCommands.push({
+          _obj: "select",
+          _target: [{ _ref: "layer", _name: validNames[0] }],
+          makeVisible: false,
+          _options: { dialogOptions: "dontDisplay" }
+        });
+        for (let i = 1; i < validNames.length; i++) {
+          selectCommands.push({
+            _obj: "select",
+            _target: [{ _ref: "layer", _name: validNames[i] }],
+            selectionModifier: { _enum: "selectionModifierType", _value: "addToSelection" },
+            makeVisible: false,
+            _options: { dialogOptions: "dontDisplay" }
+          });
+        }
       }
       selectCommands.push({
         _obj: "make",
@@ -1040,36 +1062,11 @@ async function runAnalysis(isUserInitiated) {
 
   if (isUserInitiated) setLog("Capturing snapshot \u0026 running AI segmentation\u2026", "info");
   
-  logDebug("[ANALYZE] Step 1/4: Capturing document pixels...", "info");
+  logDebug("[ANALYZE] Step 1/3: Capturing document pixels...", "info");
   const portraitBlob = await exportFullPortrait();
   currentPortraitBlob = portraitBlob;
 
-  logDebug("[ANALYZE] Step 2/4: Rendering snapshot to canvas...", "info");
-  const imgUrl = await blobToDataUrl(portraitBlob);
-  currentPortraitImage = await loadImage(imgUrl);
-
-  const imgW = currentPortraitImage.naturalWidth || currentPortraitImage.width || 500;
-  const imgH = currentPortraitImage.naturalHeight || currentPortraitImage.height || 500;
-
-  portraitDataCanvas = document.getElementById("portrait-data-canvas");
-  if (portraitDataCanvas) {
-    portraitDataCanvas.width = imgW;
-    portraitDataCanvas.height = imgH;
-    try {
-      const pctx = portraitDataCanvas.getContext("2d");
-      if (pctx && typeof pctx.drawImage === "function") {
-        pctx.drawImage(currentPortraitImage, 0, 0);
-      }
-    } catch (drawErr) {
-      console.warn("Offscreen sampling canvas drawImage:", drawErr);
-    }
-  }
-
-  resizeViewport(imgW, imgH);
-  canvasEmptyOverlay.classList.add("hidden");
-  renderCanvas();
-
-  logDebug(`[ANALYZE] Step 3/4: Sending ${imgW}x${imgH}px snapshot to ${getServerUrl()}/analyze...`, "info");
+  logDebug(`[ANALYZE] Step 2/3: Sending snapshot to ${getServerUrl()}/analyze...`, "info");
   const formData = new FormData();
   formData.append("image", portraitBlob, "portrait.png");
   formData.append("sensitivity", (parseInt(sliderSensitivity.value, 10) / 100).toString());
@@ -1089,7 +1086,36 @@ async function runAnalysis(isUserInitiated) {
     throw new Error(`Analyze failed (${res.status}): ${errText}`);
   }
   const data = await res.json();
-  logDebug(`[ANALYZE] Step 4/4: /analyze completed in ${analyzeDuration}ms. Found ${data.blobs ? data.blobs.length : 0} spots, ${data.skin_percentage}% skin.`, "ok");
+  logDebug(`[ANALYZE] Step 3/3: /analyze completed in ${analyzeDuration}ms. Found ${data.blobs ? data.blobs.length : 0} spots, ${data.skin_percentage}% skin.`, "ok");
+
+  // Load optimized preview portrait image returned by backend (instant decode in UXP)
+  // Load optimized preview portrait image returned by backend (instant decode in UXP)
+  if (data.preview_base64) {
+    currentPortraitImage = await loadImage(data.preview_base64, "view-img-before");
+  } else {
+    const imgUrl = await blobToDataUrl(portraitBlob);
+    currentPortraitImage = await loadImage(imgUrl, "view-img-before");
+  }
+
+  const imgW = (data.image_size && data.image_size[0]) || (currentPortraitImage && (currentPortraitImage.naturalWidth || currentPortraitImage.width)) || 500;
+  const imgH = (data.image_size && data.image_size[1]) || (currentPortraitImage && (currentPortraitImage.naturalHeight || currentPortraitImage.height)) || 500;
+
+  portraitDataCanvas = document.getElementById("portrait-data-canvas");
+  if (portraitDataCanvas && currentPortraitImage) {
+    portraitDataCanvas.width = currentPortraitImage.naturalWidth || imgW;
+    portraitDataCanvas.height = currentPortraitImage.naturalHeight || imgH;
+    try {
+      const pctx = portraitDataCanvas.getContext("2d");
+      if (pctx && typeof pctx.drawImage === "function") {
+        pctx.drawImage(currentPortraitImage, 0, 0);
+      }
+    } catch (drawErr) {
+      console.warn("Offscreen sampling canvas drawImage:", drawErr);
+    }
+  }
+
+  resizeViewport(imgW, imgH);
+  canvasEmptyOverlay.classList.add("hidden");
 
   // Merge: fresh auto blobs + previously added manual/text blobs that survive
   const previousManual = currentBlobs.filter(b =>
@@ -1122,11 +1148,11 @@ async function runAnalysis(isUserInitiated) {
 
   resultImage = null;
   renderCanvas();
-  setLog(`Detected ${newAuto.length} spots (${data.skin_percentage}% skin) in ${data.process_time_ms}ms. Rendering result preview\u2026`, "success");
+  setLog(`Detected ${newAuto.length} spots (${data.skin_percentage}% skin) in ${data.process_time_ms}ms.`, "success");
 
-  // Immediately show the retouched look on the AFTER side
+  // Launch Before/After result preview non-blocking
   logDebug("[ANALYZE] Launching Before/After result preview...", "info");
-  await runPreview();
+  runPreview().catch(prevErr => console.warn("Initial preview error:", prevErr));
   logDebug("[ANALYZE] Ready for interactive editing!", "ok");
   return data;
 }
@@ -1332,21 +1358,21 @@ chkEnableEyesTeeth.addEventListener("change", () => schedulePreview(250));
 chkEnableShine.addEventListener("change", () => schedulePreview(250));
 
 /* ============================== LAYER 4: AI TEXT REFINEMENT ============================== */
-btnSendPrompt.addEventListener("click", async () => {
-  const promptText = inputPrompt.value.trim();
-  if (!promptText) return;
+async function submitPrompt(promptText) {
+  const text = (promptText || inputPrompt.value || "").trim();
+  if (!text) return;
   if (!currentPortraitBlob) {
     setLog("Click 'Analyze Portrait' first.", "warning");
     return;
   }
 
-  setLog(`AI instruction: "${promptText}"\u2026`, "info");
+  setLog(`AI instruction: "${text}"\u2026`, "info");
   btnSendPrompt.disabled = true;
 
   try {
     const formData = new FormData();
     formData.append("image", currentPortraitBlob, "portrait.png");
-    formData.append("prompt", promptText);
+    formData.append("prompt", text);
     formData.append("blobs_json", JSON.stringify(currentBlobs));
 
     const res = await fetch(`${getServerUrl()}/refine-text`, { method: "POST", body: formData });
@@ -1355,7 +1381,12 @@ btnSendPrompt.addEventListener("click", async () => {
     const data = await res.json();
     currentBlobs = data.blobs || currentBlobs;
     renderCanvas();
-    setLog(`AI refinement applied (${data.action}). Preview updating\u2026`, "success");
+
+    if (data.status === "info" && data.message) {
+      setLog(data.message, "info");
+    } else {
+      setLog(`AI refinement applied: ${data.action || 'updated'}. Preview updating\u2026`, "success");
+    }
     inputPrompt.value = "";
     schedulePreview(300);
 
@@ -1365,6 +1396,23 @@ btnSendPrompt.addEventListener("click", async () => {
   } finally {
     btnSendPrompt.disabled = false;
   }
+}
+
+btnSendPrompt.addEventListener("click", () => submitPrompt());
+
+inputPrompt.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    submitPrompt();
+  }
+});
+
+document.querySelectorAll(".prompt-chip").forEach(chip => {
+  chip.addEventListener("click", () => {
+    const promptText = chip.getAttribute("data-prompt") || chip.textContent.replace(/^✨\s*/, "").trim();
+    inputPrompt.value = promptText;
+    submitPrompt(promptText);
+  });
 });
 
 /* ============================== REVIEWED TRAINING EXPORT ============================== */
@@ -1450,6 +1498,7 @@ btnApplyAll.addEventListener("click", async () => {
     setLog("Capturing fresh full-resolution snapshot\u2026", "info");
     const portraitBlob = await exportFullPortrait();
     const placedNames = [];
+    const placedIds = [];
 
     // Heal chain: when healing is enabled, downstream layers (D&B, Smooth,
     // Shine) must be computed from the HEALED base — otherwise the original
@@ -1475,16 +1524,15 @@ btnApplyAll.addEventListener("click", async () => {
         healForm.append("texture_blend", (parseInt(sliderTexture.value, 10) / 100).toString());
         healForm.append("feather_radius", sliderFeather.value);
         healForm.append("grain_intensity", (parseInt(sliderGrain.value, 10) / 100).toString());
-        // Skin mask keeps the healer's baseline sampling on real skin pixels
-        // (prevents grey patches next to nostrils / nose folds).
         if (currentSkinMaskBlob) healForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
 
         const healRes = await fetch(`${getServerUrl()}/apply-heal`, { method: "POST", body: healForm });
         if (!healRes.ok) throw new Error(`Healing failed: ${await healRes.text()}`);
 
         const healBuffer = await (await healRes.blob()).arrayBuffer();
-        await placePatchAsLayer(healBuffer, "healed_layer.png", "AI Healed Blemishes");
+        const hid = await placePatchAsLayer(healBuffer, "healed_layer.png", "AI Healed Blemishes");
         placedNames.push("AI Healed Blemishes");
+        if (hid) placedIds.push(hid);
       }
     }
 
@@ -1508,8 +1556,9 @@ btnApplyAll.addEventListener("click", async () => {
       const dbRes = await fetch(`${getServerUrl()}/apply-dodge-burn`, { method: "POST", body: dbForm });
       if (dbRes.ok) {
         const dbBuffer = await (await dbRes.blob()).arrayBuffer();
-        await placePatchAsLayer(dbBuffer, "dodge_burn_layer.png", "AI Dodge & Burn");
+        const dbid = await placePatchAsLayer(dbBuffer, "dodge_burn_layer.png", "AI Dodge & Burn");
         placedNames.push("AI Dodge & Burn");
+        if (dbid) placedIds.push(dbid);
       }
     }
 
@@ -1535,16 +1584,36 @@ btnApplyAll.addEventListener("click", async () => {
       if (!smoothRes.ok) throw new Error(`Smoothing failed: ${await smoothRes.text()}`);
 
       const smoothBuffer = await (await smoothRes.blob()).arrayBuffer();
-      await placePatchAsLayer(smoothBuffer, "smoothed_layer.png", "AI Smoothed Skin");
+      const smid = await placePatchAsLayer(smoothBuffer, "smoothed_layer.png", "AI Smoothed Skin");
       placedNames.push("AI Smoothed Skin");
+      if (smid) placedIds.push(smid);
     }
 
-    /* ACTION 4: Native Photoshop Curves adjustment, masked to detected skin. */
+    /* ACTION 4: AI Skin Tone Harmonization & Lift */
     if (doLighten) {
-      applyBtnText.textContent = "Creating native Curves layer\u2026";
-      setLog("Creating an editable, skin-masked Curves adjustment\u2026", "info");
-      await createMaskedToneLiftLayer();
-      placedNames.push("AI Skin Tone Lift");
+      applyBtnText.textContent = "Applying Skin Tone Lift\u2026";
+      setLog("AI Skin Tone Harmonization\u2026", "info");
+
+      const lightenForm = new FormData();
+      lightenForm.append("image", portraitBlob, "portrait.png");
+      lightenForm.append("strength", (parseInt(sliderStrength.value, 10) / 100).toString());
+      lightenForm.append("feather_radius", sliderFeather ? sliderFeather.value : "4");
+      lightenForm.append("base_tone_lab", JSON.stringify(sampledBaseTone.lab));
+      if (currentSkinMaskBlob) lightenForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
+      if (healChainActive) {
+        lightenForm.append("blobs_json", JSON.stringify(healChainBlobs));
+        lightenForm.append("heal_mode", healChainParams.heal_mode);
+        lightenForm.append("texture_blend", healChainParams.texture_blend);
+        lightenForm.append("grain_intensity", healChainParams.grain_intensity);
+      }
+
+      const lightenRes = await fetch(`${getServerUrl()}/apply-lighten`, { method: "POST", body: lightenForm });
+      if (lightenRes.ok) {
+        const lightenBuffer = await (await lightenRes.blob()).arrayBuffer();
+        const lid = await placePatchAsLayer(lightenBuffer, "lighten_layer.png", "AI Skin Tone Lift");
+        placedNames.push("AI Skin Tone Lift");
+        if (lid) placedIds.push(lid);
+      }
     }
 
     /* ACTION 5: AI Eyes & Teeth Enhancer */
@@ -1561,8 +1630,9 @@ btnApplyAll.addEventListener("click", async () => {
       const eyeRes = await fetch(`${getServerUrl()}/apply-eye-teeth`, { method: "POST", body: eyeForm });
       if (eyeRes.ok) {
         const eyeBuffer = await (await eyeRes.blob()).arrayBuffer();
-        await placePatchAsLayer(eyeBuffer, "eyes_teeth_layer.png", "AI Eyes & Teeth");
+        const etid = await placePatchAsLayer(eyeBuffer, "eyes_teeth_layer.png", "AI Eyes & Teeth");
         placedNames.push("AI Eyes & Teeth");
+        if (etid) placedIds.push(etid);
       }
     }
 
@@ -1586,15 +1656,16 @@ btnApplyAll.addEventListener("click", async () => {
       const shineRes = await fetch(`${getServerUrl()}/apply-shine-neutralize`, { method: "POST", body: shineForm });
       if (shineRes.ok) {
         const shineBuffer = await (await shineRes.blob()).arrayBuffer();
-        await placePatchAsLayer(shineBuffer, "anti_shine_layer.png", "AI Anti-Glare Shine");
+        const shid = await placePatchAsLayer(shineBuffer, "anti_shine_layer.png", "AI Anti-Glare Shine");
         placedNames.push("AI Anti-Glare Shine");
+        if (shid) placedIds.push(shid);
       }
     }
 
     /* Group results under one tidy group */
-    if (placedNames.length > 1) {
+    if (placedNames.length > 1 || placedIds.length > 1) {
       applyBtnText.textContent = "Grouping layers\u2026";
-      await groupRetouchLayers("AI Retouch", placedNames);
+      await groupRetouchLayers("AI Retouch", placedNames, placedIds);
     }
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);

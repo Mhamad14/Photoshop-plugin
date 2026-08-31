@@ -13,7 +13,7 @@ def even_redness(img_rgb: np.ndarray, skin_mask: np.ndarray, strength: float = 0
     Melanin-Aware Skin Redness Neutralizer:
     Evens out blotchy erythema and acne redness across facial skin by gently pulling
     each pixel's CIE LAB a* (green-red) and b* (blue-yellow) chroma toward the local
-    healthy-skin baseline while preserving genuine cheek blush and luminance (L*).
+    healthy-skin baseline while preserving genuine cheek blush, nose warmth, and luminance (L*).
     """
     if strength <= 0:
         return img_rgb
@@ -26,21 +26,37 @@ def even_redness(img_rgb: np.ndarray, skin_mask: np.ndarray, strength: float = 0
     lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
     l_chan, a_chan, b_chan = cv2.split(lab)
 
+    # Valid skin filter: avoid background white/black and non-skin edges
+    valid_skin = (skin_w > 0) & (l_chan > 30.0) & (l_chan < 248.0)
+    valid_weight = valid_skin.astype(np.float32)
+
     # Multi-scale spatial averaging for organic healthy baseline
-    sigma = max(12.0, min(h, w) / 22.0)
-    norm_w = cv2.GaussianBlur(skin_w, (0, 0), sigma) + 1e-5
-    a_base = cv2.GaussianBlur(a_chan * skin_w, (0, 0), sigma) / norm_w
-    b_base = cv2.GaussianBlur(b_chan * skin_w, (0, 0), sigma) / norm_w
+    sigma = max(10.0, min(h, w) / 28.0)
+    norm_w = cv2.GaussianBlur(valid_weight, (0, 0), sigma)
+    blurred_a = cv2.GaussianBlur(a_chan * valid_weight, (0, 0), sigma)
+    blurred_b = cv2.GaussianBlur(b_chan * valid_weight, (0, 0), sigma)
 
-    # Isolate excess redness (a* significantly higher than local skin baseline)
-    excess_a = np.clip(a_chan - a_base, 0.0, 50.0)
+    a_base = np.where(norm_w > 1e-3, blurred_a / (norm_w + 1e-6), a_chan)
+    b_base = np.where(norm_w > 1e-3, blurred_b / (norm_w + 1e-6), b_chan)
+
+    # Constrain baseline to healthy human skin range (a* >= 134, b* >= 132 in OpenCV LAB)
+    a_base = np.clip(a_base, 134.0, 168.0)
+    b_base = np.clip(b_base, 132.0, 175.0)
+
+    # Isolate excess redness (only when a* is significantly higher than local skin baseline)
+    excess_a = np.maximum(0.0, a_chan - (a_base + 2.5))
     
-    # Protect natural lip & cheek pinkness (do not over-neutralize high-saturation warm zones)
-    blush_protect = np.clip((a_chan - 170.0) / 30.0, 0.0, 1.0)
-    redness_factor = (strength * (1.0 - blush_protect * 0.6) * skin_w)
+    # Protect natural blush and high-saturation warm zones
+    blush_protect = np.clip((a_chan - 156.0) / 24.0, 0.0, 1.0)
+    support = np.clip(norm_w / 0.12, 0.0, 1.0)
+    redness_factor = (strength * (1.0 - blush_protect * 0.65) * skin_w * support)
 
-    a_new = a_chan - (excess_a * redness_factor * 0.85)
-    b_new = b_chan * (1.0 - redness_factor * 0.15) + b_base * (redness_factor * 0.15)
+    a_new = a_chan - (excess_a * redness_factor * 0.70)
+    b_new = b_chan * (1.0 - redness_factor * 0.10) + b_base * (redness_factor * 0.10)
+
+    # Warmth floor: skin must never become gray/green/blue
+    a_new = np.maximum(a_new, 132.0)
+    b_new = np.maximum(b_new, 130.0)
 
     merged = cv2.merge([l_chan, a_new, b_new]).clip(0, 255).astype(np.uint8)
     return cv2.cvtColor(merged, cv2.COLOR_LAB2RGB)
@@ -76,8 +92,12 @@ def frequency_separation_smooth(
     sigma_mid = max(4.0, dim * 0.007)
     sigma_low = max(18.0, dim * 0.035)
 
-    # 1. Base Low-Frequency Layer (broad lighting & bone volume)
-    base_low = cv2.GaussianBlur(img_f, (0, 0), sigma_low)
+    # 1. Base Low-Frequency Layer with boundary skin normalization
+    # Strictly normalizes by skin mask so pure white background (#ffffff) and dark nostrils never bleed into skin edges
+    skin_f_weight = (mask_binary > 0).astype(np.float32)
+    norm_low = cv2.GaussianBlur(skin_f_weight, (0, 0), sigma_low) + 1e-5
+    base_low = cv2.GaussianBlur(img_f * skin_f_weight[:, :, None], (0, 0), sigma_low) / norm_low[:, :, None]
+    base_low = np.where(skin_f_weight[:, :, None] > 0.01, base_low, img_f)
     
     # 2. Intermediate Smooth Layer (edge-preserving guided bilateral filter)
     d_val = max(5, min(13, int(dim * 0.005) | 1))

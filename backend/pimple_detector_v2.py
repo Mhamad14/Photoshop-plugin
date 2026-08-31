@@ -265,16 +265,25 @@ def compute_multi_channel_blemish_energy(
     hair_attenuation = np.clip(1.0 - (coherence - 0.38) * 2.2, 0.05, 1.0)
     spot_energy = spot_energy * hair_attenuation
 
-    # 8. Erode skin margin to protect jawline/hairline boundaries
-    kernel_skin_margin = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    # 8. Anatomical Cavity & Nostril Protection:
+    # Deep shadows, nostril cavities, and mouth corners (L* < 55 or Gray < 55) must NEVER be detected as pimples.
+    dark_cavities = ((gray < 55.0) | (l_chan < 55.0)).astype(np.uint8) * 255
+    k_cav = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
+    dilated_cavities = cv2.dilate(dark_cavities, k_cav)
+    spot_energy[dilated_cavities > 0] = 0.0
+
+    # 9. Profile Contour Margin Protection:
+    # Erode skin margin to protect outer facial profile (nose tip, lips, chin contour against white/dark background)
+    margin_ksize = max(11, int(min(h, w) * 0.018) | 1)
+    kernel_skin_margin = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (margin_ksize, margin_ksize))
     skin_inner = cv2.erode(skin_binary, kernel_skin_margin)
     spot_energy[skin_inner == 0] = 0.0
 
-    # 9. Structural Edge Exclusion (protect sharp boundaries: lips, nose tip, eyelids)
+    # 10. Structural Edge Exclusion (protect sharp boundaries: lips, nose contours, eyelids)
     edges = cv2.Canny(gray.astype(np.uint8), 35, 95)
-    kernel_edge = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    kernel_edge = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
     edge_exclusion = cv2.dilate(edges, kernel_edge)
-    spot_energy[edge_exclusion > 0] *= 0.12
+    spot_energy[edge_exclusion > 0] = 0.0
 
     return spot_energy
 

@@ -22,48 +22,60 @@ logger = logging.getLogger("spot_healer")
 def neutralize_erythema_annulus(
     img_rgb: np.ndarray,
     mask_gray: np.ndarray,
-    annulus_radius: int = 15,
+    annulus_radius: int = 12,
     skin_mask: Optional[np.ndarray] = None
 ) -> np.ndarray:
     """
     Pulls inflamed redness (a* channel) inside the blemish mask toward the healthy
-    surrounding skin baseline sampled from the outer annulus.
+    surrounding skin baseline sampled from the local skin annulus.
 
-    When skin_mask is provided, only pixels classified as facial skin contribute
-    to the healthy baseline. Heals beside the nostrils / nose folds otherwise
-    sample dark crevice pixels, skewing the baseline and leaving grey
-    (over-desaturated) or reddish (mis-targeted) patches behind.
+    Strictly validates skin pixels (excluding background whites/blacks, nostrils, and hair)
+    so edge features like the nose tip and chin never sample background gray values.
+    Only neutralizes EXCESS redness (a* > healthy baseline); never desaturates normal skin.
     """
     h, w, _ = img_rgb.shape
     img_lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
     l_c, a_c, b_c = cv2.split(img_lab)
 
-    k_dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (annulus_radius, annulus_radius))
-    dilated_mask = cv2.dilate(mask_gray, k_dil)
-    skin_weight = (dilated_mask == 0).astype(np.float32)
+    # Valid skin filter: avoid pure white background (>250), dark crevices (<20), and non-skin
+    valid_skin = (l_c > 25.0) & (l_c < 248.0)
     if skin_mask is not None:
-        skin_weight = skin_weight * (skin_mask > 30).astype(np.float32)
+        valid_skin = valid_skin & (skin_mask > 25)
 
-    sigma = max(12.0, min(h, w) * 0.08)
+    k_dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (annulus_radius * 2 + 1, annulus_radius * 2 + 1))
+    dilated_mask = cv2.dilate(mask_gray, k_dil)
+
+    # Reference sampling weight: valid skin pixels strictly outside the blemish mask
+    skin_weight = ((dilated_mask == 0) & valid_skin).astype(np.float32)
+
+    # Localized spatial sigma to prevent distant background bleeding
+    sigma = max(6.0, min(h, w) * 0.025)
     norm_w = cv2.GaussianBlur(skin_weight, (0, 0), sigma)
     blurred_a = cv2.GaussianBlur(a_c * skin_weight, (0, 0), sigma)
     blurred_b = cv2.GaussianBlur(b_c * skin_weight, (0, 0), sigma)
 
-    # Reliable-reference guard: where too few healthy reference pixels surround
-    # the blemish (nostril borders, oversized masks, image edges) the weighted
-    # baseline degenerates. Fade the chroma correction out there instead of
-    # pulling a* toward a meaningless near-zero average (green/grey cast).
-    support = np.clip(norm_w / 0.10, 0.0, 1.0)
+    # Safe fallback to current values if no local skin reference exists
     healthy_a = np.where(norm_w > 1e-3, blurred_a / (norm_w + 1e-6), a_c)
     healthy_b = np.where(norm_w > 1e-3, blurred_b / (norm_w + 1e-6), b_c)
 
-    # 0.92 pull on a*: inflamed red must be almost fully replaced by the
-    # healthy baseline or a faint pink ghost survives under the heal.
-    mask_factor = (dilated_mask.astype(np.float32) / 255.0) * support
-    a_pull = mask_factor * 0.92
-    b_pull = mask_factor * 0.70
-    a_corrected = a_c * (1.0 - a_pull) + healthy_a * a_pull
-    b_corrected = b_c * (1.0 - b_pull) + healthy_b * b_pull
+    # Natural skin chroma floor: OpenCV LAB neutral is 128. Real human skin has a* >= 134, b* >= 132.
+    healthy_a = np.clip(healthy_a, 134.0, 175.0)
+    healthy_b = np.clip(healthy_b, 132.0, 180.0)
+
+    # Only pull down EXCESS redness where current a* is significantly higher than healthy baseline
+    mask_factor = (dilated_mask.astype(np.float32) / 255.0)
+    support = np.clip(norm_w / 0.08, 0.0, 1.0)
+    
+    excess_a = np.maximum(0.0, a_c - healthy_a)
+    a_corrected = a_c - (excess_a * mask_factor * support * 0.85)
+
+    # Keep b* warm (never pull toward cold/blue)
+    excess_b_dev = (b_c - healthy_b) * mask_factor * support * 0.35
+    b_corrected = b_c - excess_b_dev
+
+    # Safety clamp: never allow a* or b* to fall into gray/green/blue territory on skin
+    a_corrected = np.maximum(a_corrected, 132.0)
+    b_corrected = np.maximum(b_corrected, 130.0)
 
     lab_clean = cv2.merge([l_c, a_corrected, b_corrected]).clip(0, 255).astype(np.uint8)
     return cv2.cvtColor(lab_clean, cv2.COLOR_LAB2RGB)
@@ -73,107 +85,70 @@ def match_tone_and_texture(
     original_img: np.ndarray,
     healed_img: np.ndarray,
     mask_gray: np.ndarray,
-    blend: float = 0.9,
+    blend: float = 0.5,
     skin_mask: Optional[np.ndarray] = None
 ) -> np.ndarray:
     """
-    Healed-Patch Tone & Texture Normalizer (the 'invisible patch' pass).
+    Component-Localized Tone & Texture Normalizer.
 
-    LaMa reconstructs plausible skin, but its luminance mean, contrast, and pore
-    amplitude can deviate slightly from the surrounding skin, leaving a faintly
-    visible patch. This pass statistically matches the healed core to the healthy
-    ring around it — the exact adjustment a professional retoucher makes manually:
-
-    1. L* mean shift   -> kills darker/lighter patches
-    2. L* contrast gain -> matches tonal energy of surrounding skin
-    3. a*/b* chroma shift -> matches skin hue (light touch; erythema handled earlier)
-    4. High-frequency amplitude equalization -> pore density matches neighbors
-
-    When skin_mask is provided, only pixels classified as facial skin form the
-    healthy ring. Nose-adjacent heals otherwise match against nostril shadows
-    and nose-fold pixels — the source of grey patches on the nose. All tone
-    corrections are additionally localized to the healed core so surrounding
-    features (nostrils, lips, hair) are never remapped at the feather band.
+    Adjusts each connected healed patch locally against its immediate surrounding
+    skin annulus (10-30px) rather than a whole-image global average, preserving the
+    distinct lighting and 3D volume of the nose, chin, and cheekbones.
     """
-    mask_bin = mask_gray > 10
+    mask_bin = (mask_gray > 10).astype(np.uint8)
     if np.sum(mask_bin) == 0:
         return healed_img
 
-    # Guard: if the mask covers most of the frame there is no representative
-    # healthy ring left to match against — matching would corrupt global tone.
     h, w = mask_gray.shape[:2]
-    if np.sum(mask_bin) > 0.35 * h * w:
-        return healed_img
-
-    # Healthy ring: band of real skin 10-60px outside the mask
-    mask_u8 = mask_bin.astype(np.uint8)
-    k_in = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
-    k_out = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (121, 121))
-    ring = ((cv2.dilate(mask_u8, k_out) - cv2.dilate(mask_u8, k_in)) > 0) & ~mask_bin
-    # Skin-only ring sampling: exclude nostril shadows, folds, hair and
-    # background pixels from the reference statistics.
-    if skin_mask is not None:
-        ring = ring & (skin_mask > 30)
-    if np.sum(ring) < 500:
-        # Not enough classified healthy skin around the patch to match against
-        # (e.g. spot at the nostril border) — keep LaMa output untouched rather
-        # than matching against non-skin statistics.
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask_bin)
+    if num_labels <= 1:
         return healed_img
 
     orig_lab = cv2.cvtColor(original_img, cv2.COLOR_RGB2LAB).astype(np.float32)
     healed_lab = cv2.cvtColor(healed_img, cv2.COLOR_RGB2LAB).astype(np.float32)
 
-    # Soft application mask: corrections fade out within a few pixels of the
-    # patch edge so the downstream feathered composite blends raw LaMa values
-    # (which already match the context) at the boundary instead of remapped ones.
-    soft = cv2.GaussianBlur(mask_bin.astype(np.float32), (11, 11), 0)
+    # Valid skin mask
+    valid_skin = (orig_lab[:, :, 0] > 25.0) & (orig_lab[:, :, 0] < 248.0)
+    if skin_mask is not None:
+        valid_skin = valid_skin & (skin_mask > 25)
 
-    # 1 + 2. Luminance mean & contrast matching
-    ring_l = orig_lab[ring, 0]
-    core_l = healed_lab[mask_bin, 0]
-    ring_mean, ring_std = float(ring_l.mean()), float(ring_l.std() + 1e-5)
-    core_mean, core_std = float(core_l.mean()), float(core_l.std() + 1e-5)
-
-    gain = float(np.clip(ring_std / core_std, 0.75, 1.35))
-    l_chan = healed_lab[:, :, 0]
-    l_adjusted = np.clip(
-        (l_chan - core_mean) * gain + core_mean + (ring_mean - core_mean) * blend,
-        0, 255
-    )
-    healed_lab[:, :, 0] = l_chan * (1.0 - soft) + l_adjusted * soft
-
-    # 3. Chroma shift toward ring tone (subtle). MEDIAN, not mean: inflamed
-    # halo pixels around a fresh pimple would drag the mean toward red and
-    # re-introduce the exact redness we just removed.
-    for ch in (1, 2):
-        ring_m = float(np.median(orig_lab[ring, ch]))
-        core_m = float(np.median(healed_lab[mask_bin, ch]))
-        ch_adjusted = np.clip(
-            healed_lab[:, :, ch] + (ring_m - core_m) * 0.55 * blend, 0, 255
-        )
-        healed_lab[:, :, ch] = healed_lab[:, :, ch] * (1.0 - soft) + ch_adjusted * soft
-
-    out = cv2.cvtColor(healed_lab.astype(np.uint8), cv2.COLOR_LAB2RGB).astype(np.float32)
-
-    # 4. High-frequency pore amplitude equalization (per channel).
-    # Replace (not add) the AC component so amplitude matches the ring.
-    healed_f = healed_img.astype(np.float32)
-    orig_f = original_img.astype(np.float32)
-    hf_healed = healed_f - cv2.GaussianBlur(healed_f, (5, 5), 0)
-    hf_orig = orig_f - cv2.GaussianBlur(orig_f, (5, 5), 0)
-
-    for ch in range(3):
-        amp_ring = float(hf_orig[ring, ch].std() + 1e-5)
-        amp_core = float(hf_healed[mask_bin, ch].std() + 1e-5)
-        ratio = float(np.clip(amp_ring / amp_core, 0.7, 1.4))
-        if abs(ratio - 1.0) < 0.05:
+    # Iterate over individual connected components for localized matching
+    for i in range(1, num_labels):
+        comp_mask = (labels == i).astype(np.uint8)
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area < 4:
             continue
-        hf_ch = hf_healed[:, :, ch]
-        # delta replaces the existing AC amplitude with the matched one
-        hf_healed[:, :, ch] = hf_ch * ratio
 
-    out = out + (hf_healed - (healed_f - cv2.GaussianBlur(healed_f, (5, 5), 0))) * mask_bin[:, :, None]
-    return np.clip(out, 0, 255).astype(np.uint8)
+        # Local ring around this specific spot
+        k_in = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        k_out = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
+        local_ring = ((cv2.dilate(comp_mask, k_out) - cv2.dilate(comp_mask, k_in)) > 0) & valid_skin & (mask_bin == 0)
+
+        if np.sum(local_ring) < 30:
+            continue
+
+        # Local luminance & chroma stats
+        ring_l = orig_lab[local_ring, 0]
+        core_l = healed_lab[comp_mask > 0, 0]
+        ring_l_mean = float(np.median(ring_l))
+        core_l_mean = float(np.median(core_l))
+
+        # Gentle localized luminance offset (clamped to max +/- 4.0 LAB units to prevent smudging)
+        l_offset = np.clip((ring_l_mean - core_l_mean) * blend, -4.0, 4.0)
+
+        # Soft blend mask
+        soft = cv2.GaussianBlur(comp_mask.astype(np.float32), (7, 7), 0)
+        healed_lab[:, :, 0] = healed_lab[:, :, 0] + (l_offset * soft)
+
+        # Chroma matching (light touch)
+        for ch in (1, 2):
+            ring_ch = float(np.median(orig_lab[local_ring, ch]))
+            core_ch = float(np.median(healed_lab[comp_mask > 0, ch]))
+            ch_offset = np.clip((ring_ch - core_ch) * 0.4 * blend, -3.0, 3.0)
+            healed_lab[:, :, ch] = healed_lab[:, :, ch] + (ch_offset * soft)
+
+    out = cv2.cvtColor(healed_lab.clip(0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB)
+    return out
 
 
 def spot_healing_brush_inpaint(
@@ -181,7 +156,7 @@ def spot_healing_brush_inpaint(
     blobs: List[Dict[str, Any]],
     lama_model: Any = None,
     heal_mode: str = "pro_spot_healer",
-    texture_blend: float = 0.35,
+    texture_blend: float = 0.30,
     dilate_px: int = 4,
     feather_radius: int = 3,
     grain_intensity: float = 0.03,
@@ -212,22 +187,20 @@ def spot_healing_brush_inpaint(
         cx = int(round(b.get("centroid", [0, 0])[0]))
         cy = int(round(b.get("centroid", [0, 0])[1]))
         r = int(b.get("radius", 6))
-        expanded_r = max(5, int(r * 1.45) + 2)
+        expanded_r = max(5, int(r * 1.35) + 2)
         cv2.circle(raw_mask, (cx, cy), expanded_r, 255, -1)
 
     # 2. Morphological Cluster Fusion: bridges clustered acne into smooth contiguous contours
-    k_fuse = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    k_fuse = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
     fused_mask = cv2.morphologyEx(raw_mask, cv2.MORPH_CLOSE, k_fuse)
     if dilate_px > 0:
         k_dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_px * 2 + 1, dilate_px * 2 + 1))
         fused_mask = cv2.dilate(fused_mask, k_dil)
 
-    # 3. Step 1: Neutralize Erythema & Deep Redness under mask
-    color_neutral_rgb = neutralize_erythema_annulus(img_rgb, fused_mask, annulus_radius=15, skin_mask=skin_mask)
+    # 3. Step 1: Neutralize Erythema & Deep Redness under mask with strict skin safety
+    color_neutral_rgb = neutralize_erythema_annulus(img_rgb, fused_mask, annulus_radius=12, skin_mask=skin_mask)
 
     # 4. Step 2: Neural Inpainting (LaMa) with Telea as fallback only.
-    # NOTE: never run Telea as a pre-pass when LaMa is available — diffusion
-    # inpainting flattens skin into smudges. LaMa reconstructs real skin.
     lama_used = False
     if lama_model is not None:
         try:
@@ -259,35 +232,35 @@ def spot_healing_brush_inpaint(
         blurred_orig = cv2.GaussianBlur(orig_f, (5, 5), 0)
         high_freq = orig_f - blurred_orig
 
-        k_inner = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-        k_outer = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
+        k_inner = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        k_outer = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (19, 19))
         mask_inner = cv2.dilate(fused_mask, k_inner)
         mask_outer = cv2.dilate(fused_mask, k_outer)
         annulus_mask = np.clip(mask_outer.astype(np.float32) - mask_inner.astype(np.float32), 0.0, 255.0) / 255.0
 
-        healthy_pore_texture = cv2.GaussianBlur(high_freq * annulus_mask[:, :, None], (5, 5), 0)
-        healed_f = healed_f + (healthy_pore_texture * (texture_blend * 1.35) * mask_f)
+        if skin_mask is not None:
+            annulus_mask = annulus_mask * (skin_mask > 25).astype(np.float32)
 
-    # 6. Step 4: Micro-Grain Matching (subtle: 3% -> sigma ~2 levels)
+        healthy_pore_texture = cv2.GaussianBlur(high_freq * annulus_mask[:, :, None], (5, 5), 0)
+        healed_f = healed_f + (healthy_pore_texture * (texture_blend * 1.1) * mask_f)
+
+    # 6. Step 4: Micro-Grain Matching (subtle: 2-3% -> sigma ~1.5 levels)
     if grain_intensity > 0:
-        noise = np.random.normal(loc=0.0, scale=grain_intensity * 64.0, size=(h, w, 3))
+        noise = np.random.normal(loc=0.0, scale=grain_intensity * 48.0, size=(h, w, 3))
         healed_f = healed_f + (noise.astype(np.float32) * mask_f)
 
     healed_f = np.clip(healed_f, 0.0, 255.0).astype(np.uint8)
 
-    # 6.5 Step 4.5: Tone & Texture Normalization — statistically match each
-    # healed region's luminance, contrast, chroma and pore amplitude to the
-    # healthy skin ring around it so the patch becomes invisible.
+    # 6.5 Step 4.5: Localized Tone Normalization
     try:
-        healed_f = match_tone_and_texture(img_rgb, healed_f, fused_mask, blend=0.9, skin_mask=skin_mask)
+        healed_f = match_tone_and_texture(img_rgb, healed_f, fused_mask, blend=0.4, skin_mask=skin_mask)
     except Exception as e:
         logger.warning(f"Tone matching skipped: {e}")
 
     healed_f = healed_f.astype(np.float32)
 
-    # 7. Step 5: Soft Edge Feathering (resolution-adaptive so full-resolution
-    # camera files get Photoshop-style soft transitions, not razor edges)
-    eff_feather = max(feather_radius, int(min(h, w) * 0.004))
+    # 7. Step 5: Soft Edge Feathering (resolution-adaptive)
+    eff_feather = max(feather_radius, int(min(h, w) * 0.003))
     if eff_feather > 0:
         ksize = eff_feather * 2 + 1
         feathered_alpha = cv2.GaussianBlur(fused_mask, (ksize, ksize), 0)
