@@ -26,11 +26,9 @@ def even_redness(img_rgb: np.ndarray, skin_mask: np.ndarray, strength: float = 0
     lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
     l_chan, a_chan, b_chan = cv2.split(lab)
 
-    # Valid skin filter: avoid background white/black and non-skin edges
     valid_skin = (skin_w > 0) & (l_chan > 30.0) & (l_chan < 248.0)
     valid_weight = valid_skin.astype(np.float32)
 
-    # Multi-scale spatial averaging for organic healthy baseline
     sigma = max(10.0, min(h, w) / 28.0)
     norm_w = cv2.GaussianBlur(valid_weight, (0, 0), sigma)
     blurred_a = cv2.GaussianBlur(a_chan * valid_weight, (0, 0), sigma)
@@ -39,14 +37,11 @@ def even_redness(img_rgb: np.ndarray, skin_mask: np.ndarray, strength: float = 0
     a_base = np.where(norm_w > 1e-3, blurred_a / (norm_w + 1e-6), a_chan)
     b_base = np.where(norm_w > 1e-3, blurred_b / (norm_w + 1e-6), b_chan)
 
-    # Constrain baseline to healthy human skin range (a* >= 134, b* >= 132 in OpenCV LAB)
     a_base = np.clip(a_base, 134.0, 168.0)
     b_base = np.clip(b_base, 132.0, 175.0)
 
-    # Isolate excess redness (only when a* is significantly higher than local skin baseline)
     excess_a = np.maximum(0.0, a_chan - (a_base + 2.5))
     
-    # Protect natural blush and high-saturation warm zones
     blush_protect = np.clip((a_chan - 156.0) / 24.0, 0.0, 1.0)
     support = np.clip(norm_w / 0.12, 0.0, 1.0)
     redness_factor = (strength * (1.0 - blush_protect * 0.65) * skin_w * support)
@@ -54,7 +49,6 @@ def even_redness(img_rgb: np.ndarray, skin_mask: np.ndarray, strength: float = 0
     a_new = a_chan - (excess_a * redness_factor * 0.70)
     b_new = b_chan * (1.0 - redness_factor * 0.10) + b_base * (redness_factor * 0.10)
 
-    # Warmth floor: skin must never become gray/green/blue
     a_new = np.maximum(a_new, 132.0)
     b_new = np.maximum(b_new, 130.0)
 
@@ -70,15 +64,8 @@ def frequency_separation_smooth(
     feather_radius: int = 4,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Studio-Grade Tri-Band Frequency Separation with 100% Organic Micro-Pore Retention:
-    
-    Deconstructs the portrait into 3 distinct spatial bands:
-      1. Low Band (Global Lighting & Facial Bones): Preserved at 100% so cheekbones, nose ridge,
-         and jawline maintain complete photographic depth.
-      2. Mid Band (Skin Bumps, Blotches & Mottled Tone): Selectively smoothed with edge-guided
-         filtering to eliminate roughness and uneven foundation.
-      3. High Band (Micro-Pores, Follicles & Epidermal Texture): Isolated and re-injected with
-         adaptive pore-contrast preservation to prevent the "plastic / mannequin" effect.
+    Studio-Grade Tri-Band Frequency Separation with 100% Organic Micro-Pore Retention
+    and Structural Edge Preservation (Nose, Lips, Eyes, and Profile Boundary Protection):
     """
     h, w, _ = img_rgb.shape
     mask_binary = (skin_mask > 25).astype(np.uint8)
@@ -88,12 +75,10 @@ def frequency_separation_smooth(
     img_f = img_rgb.astype(np.float32)
     dim = min(h, w)
     
-    # Dynamic scale factors proportional to portrait resolution
     sigma_mid = max(4.0, dim * 0.007)
     sigma_low = max(18.0, dim * 0.035)
 
     # 1. Base Low-Frequency Layer with boundary skin normalization
-    # Strictly normalizes by skin mask so pure white background (#ffffff) and dark nostrils never bleed into skin edges
     skin_f_weight = (mask_binary > 0).astype(np.float32)
     norm_low = cv2.GaussianBlur(skin_f_weight, (0, 0), sigma_low) + 1e-5
     base_low = cv2.GaussianBlur(img_f * skin_f_weight[:, :, None], (0, 0), sigma_low) / norm_low[:, :, None]
@@ -106,36 +91,40 @@ def frequency_separation_smooth(
     
     base_mid = cv2.bilateralFilter(img_rgb, d=d_val, sigmaColor=sigma_color, sigmaSpace=sigma_space).astype(np.float32)
     if strength > 0.5:
-        # Second refinement pass for smooth editorial finish on coarse skin
         base_mid = cv2.bilateralFilter(base_mid.clip(0, 255).astype(np.uint8), d=d_val, sigmaColor=sigma_color * 0.8, sigmaSpace=sigma_space * 0.8).astype(np.float32)
 
     # 3. High-Frequency Micro-Pore Texture Band
     high_pass_texture = img_f - base_mid
 
-    # 4. Mid-Frequency Roughness Band (mottling & foundation bumps)
+    # 4. Mid-Frequency Roughness Band
     mid_roughness = base_mid - base_low
 
     # 5. Modulate Smoothing: Smooth mid-roughness while protecting high-pass pores
     strength_clamped = max(0.0, min(1.0, strength))
     texture_clamped = max(0.10, min(1.0, texture_keep))
 
-    # Soften mid-frequency blotches by smoothing strength
     smoothed_mid = mid_roughness * (1.0 - strength_clamped * 0.75)
-    
-    # Reconstruct smoothed base
     reconstructed_base = base_low + smoothed_mid
 
-    # Pore-contrast booster: isolates true skin micro-pores (small amplitude 3-28 intensity)
+    # Pore-contrast booster
     gray_texture = cv2.cvtColor(np.abs(high_pass_texture).clip(0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
     pore_envelope = ((gray_texture >= 2) & (gray_texture <= 32)).astype(np.float32)[:, :, None]
-    
-    # Retain genuine pores with user texture multiplier
     effective_texture = high_pass_texture * (texture_clamped + (pore_envelope * 0.20 * texture_clamped))
     
     smoothed = reconstructed_base + effective_texture
     smoothed = smoothed.clip(0, 255)
 
-    # 6. Soft Feathered Blending within facial skin mask
+    # 6. Structural Feature Edge Protection (Prevents any blur on nose contour, nostrils, lips, eyes)
+    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    grad_mag = np.sqrt(gx * gx + gy * gy)
+    edge_protection = np.clip((grad_mag - 16.0) / 28.0, 0.0, 1.0)[:, :, None]
+    
+    # Blend smoothed result with original image on structural edges
+    preserved_smoothed = smoothed * (1.0 - edge_protection * 0.92) + img_f * (edge_protection * 0.92)
+
+    # 7. Soft Feathered Blending within facial skin mask
     if feather_radius > 0:
         ksize = feather_radius * 2 + 1
         feathered_alpha = cv2.GaussianBlur(skin_mask, (ksize, ksize), 0)
@@ -143,7 +132,7 @@ def frequency_separation_smooth(
         feathered_alpha = skin_mask.copy()
         
     alpha_f = (feathered_alpha.astype(np.float32) / 255.0)[:, :, None]
-    composited = img_f * (1.0 - alpha_f) + smoothed * alpha_f
+    composited = img_f * (1.0 - alpha_f) + preserved_smoothed * alpha_f
 
     return composited.clip(0, 255).astype(np.uint8), feathered_alpha
 
@@ -156,11 +145,6 @@ def apply_full_smooth(
     texture_keep: float = 0.85,
     feather_radius: int = 4,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Combined High-End Retouching Pipeline:
-    1. Neutralizes blotchy skin redness in color space.
-    2. Runs Studio Tri-Band Frequency Separation with 100% pore retention.
-    """
     if even_redness_strength > 0:
         tone_evened = even_redness(img_rgb, skin_mask, strength=even_redness_strength)
     else:
@@ -175,28 +159,34 @@ def apply_full_smooth(
     )
 
 
-def create_smoothed_rgba_patch(
+def create_smooth_rgba_patch(
     img_rgb: np.ndarray,
     skin_mask: np.ndarray,
     strength: float = 0.5,
     even_redness_strength: float = 0.4,
     texture_keep: float = 0.85,
-    feather_radius: int = 4,
-) -> Image.Image:
-    """Returns transparent RGBA PNG patch of the smoothed skin layer."""
-    smoothed_rgb, alpha = apply_full_smooth(
-        img_rgb,
-        skin_mask,
+    feather_radius: int = 4
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    smoothed_rgb, effective_mask = apply_full_smooth(
+        img_rgb=img_rgb,
+        skin_mask=skin_mask,
         strength=strength,
         even_redness_strength=even_redness_strength,
         texture_keep=texture_keep,
         feather_radius=feather_radius
     )
-    r = Image.fromarray(smoothed_rgb[:, :, 0])
-    g = Image.fromarray(smoothed_rgb[:, :, 1])
-    b = Image.fromarray(smoothed_rgb[:, :, 2])
-    a = Image.fromarray(alpha)
-    return Image.merge("RGBA", (r, g, b, a))
 
+    h, w, _ = img_rgb.shape
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    rgba[:, :, :3] = smoothed_rgb
+    rgba[:, :, 3] = effective_mask
 
-create_smooth_rgba_patch = create_smoothed_rgba_patch
+    meta = {
+        "strength": strength,
+        "texture_keep": texture_keep,
+        "even_redness_strength": even_redness_strength,
+        "feather_radius": feather_radius,
+        "layer_name": f"AI Skin Smoothing ({int(strength * 100)}%)"
+    }
+
+    return rgba, meta

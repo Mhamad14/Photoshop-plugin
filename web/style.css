@@ -1,0 +1,388 @@
+/* AI Retouch Studio Pro — MS Office / Fluent Ribbon Multi-Theme Stylesheet */
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root {
+  --font-main: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  
+  /* 1. Dark Studio Theme (Default) */
+  --bg-app: #07090e;
+  --bg-surface: #0e1220;
+  --bg-surface-elevated: #13182b;
+  --bg-card: rgba(19, 24, 43, 0.78);
+  --bg-input: #151c30;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-focus: #3b82f6;
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --accent-glow: rgba(59, 130, 246, 0.35);
+  --track-bg: #1e293b;
+  --ribbon-bg: #101524;
+  --ribbon-tab-active: #181f33;
+  --viewport-grid-bg: #07090e;
+  --grid-major: rgba(255, 255, 255, 0.08);
+  --grid-minor: rgba(255, 255, 255, 0.03);
+  --canvas-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.85);
+}
+
+/* 2. Light Office Theme */
+html.light, html[data-theme="light"] {
+  --bg-app: #f1f5f9;
+  --bg-surface: #ffffff;
+  --bg-surface-elevated: #f8fafc;
+  --bg-card: rgba(255, 255, 255, 0.92);
+  --bg-input: #f1f5f9;
+  --border-subtle: rgba(0, 0, 0, 0.09);
+  --border-focus: #2563eb;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-glow: rgba(37, 99, 235, 0.25);
+  --track-bg: #e2e8f0;
+  --ribbon-bg: #ffffff;
+  --ribbon-tab-active: #ffffff;
+  --viewport-grid-bg: #e2e8f0;
+  --grid-major: rgba(71, 85, 105, 0.18);
+  --grid-minor: rgba(71, 85, 105, 0.08);
+  --canvas-shadow: 0 20px 45px -10px rgba(0, 0, 0, 0.18);
+}
+
+/* 3. Midnight OLED Theme */
+html[data-theme="midnight"] {
+  --bg-app: #000000;
+  --bg-surface: #07090d;
+  --bg-surface-elevated: #0c0f17;
+  --bg-card: rgba(12, 15, 23, 0.85);
+  --bg-input: #0e121a;
+  --border-subtle: rgba(255, 255, 255, 0.07);
+  --border-focus: #06b6d4;
+  --text-primary: #f0fdfa;
+  --text-secondary: #94a3b8;
+  --text-muted: #475569;
+  --accent: #06b6d4;
+  --accent-hover: #0891b2;
+  --accent-glow: rgba(6, 182, 212, 0.40);
+  --track-bg: #161e2e;
+  --ribbon-bg: #07090d;
+  --ribbon-tab-active: #0f1420;
+  --viewport-grid-bg: #000000;
+  --grid-major: rgba(6, 182, 212, 0.14);
+  --grid-minor: rgba(255, 255, 255, 0.025);
+  --canvas-shadow: 0 25px 65px -15px rgba(0, 0, 0, 0.95);
+}
+
+/* 4. Nordic Arctic Theme */
+html[data-theme="nordic"] {
+  --bg-app: #08121a;
+  --bg-surface: #0e1c26;
+  --bg-surface-elevated: #132430;
+  --bg-card: rgba(19, 36, 48, 0.82);
+  --bg-input: #152733;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-focus: #10b981;
+  --text-primary: #ecfdf5;
+  --text-secondary: #94a3b8;
+  --text-muted: #52657a;
+  --accent: #10b981;
+  --accent-hover: #059669;
+  --accent-glow: rgba(16, 185, 129, 0.35);
+  --track-bg: #1e3545;
+  --ribbon-bg: #0e1c26;
+  --ribbon-tab-active: #172c3b;
+  --viewport-grid-bg: #08121a;
+  --grid-major: rgba(16, 185, 129, 0.12);
+  --grid-minor: rgba(255, 255, 255, 0.03);
+  --canvas-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.88);
+}
+
+/* 5. Editorial Sepia / Warm Theme */
+html[data-theme="sepia"] {
+  --bg-app: #141210;
+  --bg-surface: #1c1917;
+  --bg-surface-elevated: #24201d;
+  --bg-card: rgba(36, 32, 29, 0.82);
+  --bg-input: #292420;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-focus: #f59e0b;
+  --text-primary: #fffbeb;
+  --text-secondary: #a8a29e;
+  --text-muted: #78716c;
+  --accent: #f59e0b;
+  --accent-hover: #d97706;
+  --accent-glow: rgba(245, 158, 11, 0.35);
+  --track-bg: #332d27;
+  --ribbon-bg: #1c1917;
+  --ribbon-tab-active: #2a2521;
+  --viewport-grid-bg: #141210;
+  --grid-major: rgba(245, 158, 11, 0.10);
+  --grid-minor: rgba(255, 255, 255, 0.03);
+  --canvas-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.88);
+}
+
+/* 6. Cyber Synthwave Theme */
+html[data-theme="cyberpunk"] {
+  --bg-app: #0b0814;
+  --bg-surface: #120e21;
+  --bg-surface-elevated: #1a142e;
+  --bg-card: rgba(26, 20, 46, 0.82);
+  --bg-input: #1e1736;
+  --border-subtle: rgba(255, 255, 255, 0.09);
+  --border-focus: #a855f7;
+  --text-primary: #faf5ff;
+  --text-secondary: #a8a29e;
+  --text-muted: #6b7280;
+  --accent: #a855f7;
+  --accent-hover: #9333ea;
+  --accent-glow: rgba(168, 85, 247, 0.40);
+  --track-bg: #291f47;
+  --ribbon-bg: #120e21;
+  --ribbon-tab-active: #21193d;
+  --viewport-grid-bg: #0b0814;
+  --grid-major: rgba(168, 85, 247, 0.14);
+  --grid-minor: rgba(255, 255, 255, 0.03);
+  --canvas-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.90);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-main);
+  background-color: var(--bg-app);
+  color: var(--text-primary);
+  transition: background-color 0.25s ease, color 0.25s ease;
+  overflow: hidden;
+}
+
+code, kbd, pre, .font-mono {
+  font-family: var(--font-mono);
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.45);
+}
+
+/* Titlebar & Surface Panels */
+.studio-titlebar {
+  background-color: var(--bg-surface);
+  border-color: var(--border-subtle);
+}
+
+.studio-panel {
+  background-color: var(--bg-surface);
+  border-color: var(--border-subtle);
+}
+
+.studio-card {
+  background-color: var(--bg-card);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--border-subtle);
+}
+
+/* MS Office Ribbon Tabs */
+.studio-ribbon-tabs {
+  background-color: var(--bg-surface);
+  border-color: var(--border-subtle);
+}
+
+.ribbon-tab {
+  color: var(--text-secondary);
+  border: 1px solid transparent;
+  border-bottom: none;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s ease;
+}
+
+.ribbon-tab:hover {
+  color: var(--text-primary);
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+.ribbon-tab.active {
+  color: var(--accent);
+  background-color: var(--ribbon-bg);
+  border-color: var(--border-subtle);
+  border-bottom: 2px solid var(--accent);
+  font-weight: 600;
+}
+
+/* MS Office Ribbon Content & Groups */
+.studio-ribbon-content {
+  background-color: var(--ribbon-bg);
+  border-color: var(--border-subtle);
+}
+
+.ribbon-group {
+  padding-bottom: 2px;
+  border-color: var(--border-subtle);
+}
+
+.ribbon-group-label {
+  letter-spacing: 0.02em;
+  opacity: 0.75;
+  color: var(--text-muted);
+}
+
+.ribbon-btn-large {
+  min-width: 48px;
+  cursor: pointer;
+}
+
+.ribbon-btn-large:active {
+  transform: scale(0.96);
+}
+
+/* High Quality Range Slider */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--track-bg);
+  height: 4px;
+  border-radius: 9999px;
+  outline: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  box-shadow: 0 0 6px var(--accent-glow);
+  transition: transform 0.1s ease, background-color 0.15s ease;
+  border: 2px solid #ffffff;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+  background: var(--accent-hover);
+}
+
+input[type="range"]:focus::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+/* High-Definition Precision Studio Grid Background */
+.viewport-grid {
+  background-color: var(--viewport-grid-bg);
+  background-size: 100% 100%, 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-image: 
+    radial-gradient(circle at center, rgba(30, 41, 59, 0.40) 0%, rgba(6, 8, 14, 0.98) 100%),
+    linear-gradient(to right, var(--grid-major) 1.2px, transparent 1.2px),
+    linear-gradient(to bottom, var(--grid-major) 1.2px, transparent 1.2px),
+    linear-gradient(to right, var(--grid-minor) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-minor) 1px, transparent 1px);
+  transition: background-color 0.25s ease;
+}
+
+html.light .viewport-grid, html[data-theme="light"] .viewport-grid {
+  background-image: 
+    radial-gradient(circle at center, rgba(255, 255, 255, 0.85) 0%, rgba(203, 213, 225, 0.95) 100%),
+    linear-gradient(to right, var(--grid-major) 1.5px, transparent 1.5px),
+    linear-gradient(to bottom, var(--grid-major) 1.5px, transparent 1.5px),
+    linear-gradient(to right, var(--grid-minor) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-minor) 1px, transparent 1px);
+}
+
+/* Upload Card Clean Design */
+.upload-dropzone-card {
+  background-color: var(--bg-surface-elevated);
+  border: 2px dashed rgba(59, 130, 246, 0.4);
+  transition: all 0.2s ease;
+}
+
+.upload-dropzone-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 35px var(--accent-glow);
+}
+
+/* Canvas Container Absolute Positioning & Shadow */
+#canvas-container {
+  position: absolute;
+  top: 0px;
+  left: 0px;
+  box-shadow: var(--canvas-shadow);
+  border-radius: 2px;
+}
+
+/* Studio Select / Input */
+.studio-input {
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  transition: all 0.15s ease;
+}
+
+.studio-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+/* Toast Notifications Animation */
+@keyframes toastIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes toastOut {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.96);
+  }
+}
+
+.toast-enter {
+  animation: toastIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.toast-exit {
+  animation: toastOut 0.20s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Glassmorphism Dialog Modal */
+.custom-modal-backdrop {
+  background-color: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.custom-modal-box {
+  background-color: var(--bg-surface-elevated);
+  border: 1px solid var(--border-subtle);
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6);
+  color: var(--text-primary);
+}

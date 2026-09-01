@@ -215,6 +215,10 @@ def segment_face_skin(
     else:
         final_mask = cleaned_mask
 
+    # Non-skin anatomy mask (lips, mouth, nostrils, eyes, background)
+    non_skin = np.ones((h, w), dtype=np.uint8) * 255
+    non_skin[cleaned_mask > 128] = 0
+
     metadata = {
         "classes_present": [int(c) for c in np.unique(class_mask)],
         "skin_pixel_count": int(np.sum(cleaned_mask > 128)),
@@ -222,7 +226,11 @@ def segment_face_skin(
         "base_tone_rgb": base_rgb,
         "base_tone_lab": base_lab,
         "fitzpatrick_type": fitzpatrick,
-        "zones_count": len(zones)
+        "zones_count": len(zones),
+        "class_mask": class_mask,
+        "non_skin_mask": non_skin,
+        "nose_mask": zones.get("nose", np.zeros((h, w), dtype=np.uint8)),
+        "lips_mask": zones.get("lips", np.zeros((h, w), dtype=np.uint8))
     }
     
     return final_mask, metadata

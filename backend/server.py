@@ -14,14 +14,15 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, FileResponse
+from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageFilter
 import torch
 
 from blemish_detector import auto_detect_blemishes
 from gemini_detector import detect_blemishes_gemini
 from face_segmenter import segment_face_skin, get_bisenet_parser
-from pimple_detector_v2 import detect_pimple_candidates, blobs_to_mask, add_blob_at_point, toggle_blob_at_point
+from pimple_detector_v2 import detect_pimple_candidates, blobs_to_mask, add_blob_at_point, toggle_blob_at_point, delete_blob_at_point
 from skin_toner import calculate_tone_lift, create_lightened_rgba_patch
 from skin_smoother import apply_full_smooth, create_smooth_rgba_patch
 from inpainter import inpaint_with_context_tiling
@@ -91,7 +92,10 @@ def load_config() -> dict:
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r") as f:
-                return json.load(f)
+                data = json.load(f)
+                if data.get("gemini_api_key"):
+                    os.environ["GEMINI_API_KEY"] = data["gemini_api_key"]
+                return data
         except Exception:
             return {}
     return {}
@@ -154,6 +158,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount AI Retouch Web Studio
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+if WEB_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
+
+    @app.get("/")
+    async def serve_index():
+        return FileResponse(str(WEB_DIR / "index.html"))
+
+    @app.get("/app")
+    async def serve_app():
+        return FileResponse(str(WEB_DIR / "index.html"))
+
+    @app.get("/style.css")
+    async def serve_style():
+        return FileResponse(str(WEB_DIR / "style.css"))
+
+    @app.get("/app.js")
+    async def serve_js():
+        return FileResponse(str(WEB_DIR / "app.js"))
 
 
 @app.get("/health")
@@ -700,14 +725,15 @@ async def refine_point(
     image: UploadFile = File(..., description="Portrait image"),
     x: int = Form(..., description="X coordinate of click"),
     y: int = Form(..., description="Y coordinate of click"),
-    action_type: str = Form("toggle", description="'toggle' | 'add_pimple' | 'sample_tone'"),
+    action_type: str = Form("toggle", description="'toggle' | 'add_pimple' | 'delete_pimple' | 'sample_tone'"),
     blobs_json: str = Form("[]", description="JSON array of current blobs"),
-    default_radius: int = Form(7, description="Default radius for newly added blemish")
+    default_radius: int = Form(6, description="Default radius for newly added blemish")
 ):
     """
     Layer 4 Refinement:
     - action_type='toggle': toggles active state of nearest blob
     - action_type='add_pimple': adds a new pimple blob at (x, y)
+    - action_type='delete_pimple' / 'delete' / 'erase': deletes nearest blob at (x, y)
     - action_type='sample_tone': samples RGB & LAB tone at (x, y)
     """
     try:
@@ -724,6 +750,7 @@ async def refine_point(
 
     sampled_tone = None
     toggled_blob = None
+    deleted_blob = None
     new_blob = None
 
     if action_type == "sample_tone":
@@ -740,7 +767,14 @@ async def refine_point(
         }
         updated_blobs = existing_blobs
 
-    elif action_type == "add_pimple":
+    elif action_type in ("delete", "remove", "erase", "delete_pimple"):
+        updated_blobs, deleted_blob = delete_blob_at_point(
+            x=x,
+            y=y,
+            existing_blobs=existing_blobs
+        )
+
+    elif action_type in ("add_pimple", "add"):
         skin_mask = np.full((h, w), 255, dtype=np.uint8)
         updated_blobs, new_blob = add_blob_at_point(
             img_rgb=img_rgb,
@@ -774,6 +808,7 @@ async def refine_point(
         "action": action_type,
         "blobs": updated_blobs,
         "toggled_blob": toggled_blob,
+        "deleted_blob": deleted_blob,
         "new_blob": new_blob,
         "sampled_tone": sampled_tone
     })
