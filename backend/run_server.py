@@ -67,7 +67,8 @@ def main():
     
     port = find_available_port(8765)
     print(f"[*] Launching Uvicorn server on http://127.0.0.1:{port} ...")
-    print("[*] Keep this window open while using Photoshop.")
+    print(f"[+] Web Studio UI available at: http://127.0.0.1:{port}")
+    print("[*] Photoshop Plugin & Web Studio ready.")
     print("=" * 60)
     
     import uvicorn

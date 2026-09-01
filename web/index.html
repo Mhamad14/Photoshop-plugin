@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Retouch Studio Pro</title>
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#eff6ff',
+              100: '#dbeafe',
+              400: '#60a5fa',
+              500: '#3b82f6',
+              600: '#2563eb',
+              700: '#1d4ed8',
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Lucide Icons CDN -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <!-- Custom Studio CSS -->
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body class="h-screen w-screen flex flex-col antialiased select-none overflow-hidden bg-[#080a10] text-slate-100">
+
+  <!-- ========================================================================= -->
+  <!-- 1. MS OFFICE-STYLE TITLE BAR (TOP HEADER)                                -->
+  <!-- ========================================================================= -->
+  <header class="h-10 studio-titlebar border-b border-slate-200/10 dark:border-white/10 px-3 flex items-center justify-between z-50 shrink-0">
+    <!-- Brand / Title -->
+    <div class="flex items-center gap-2.5">
+      <div class="w-6 h-6 rounded bg-blue-600 flex items-center justify-center text-white shadow-sm shadow-blue-500/30">
+        <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>
+      </div>
+      <div class="flex items-center gap-1.5">
+        <span class="text-xs font-bold tracking-tight text-slate-800 dark:text-white">AI Retouch Studio</span>
+        <span class="px-1 py-0.2 rounded text-[9px] font-mono font-semibold bg-blue-500/15 text-blue-600 dark:text-blue-400 border border-blue-500/30">PRO</span>
+      </div>
+    </div>
+
+    <!-- Center System Status Badges -->
+    <div class="hidden md:flex items-center gap-2 text-[11px] font-mono">
+      <div id="server-status-pill" class="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800/90 border border-slate-200 dark:border-white/10 text-slate-600 dark:text-slate-300">
+        <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" id="server-status-dot"></span>
+        <span id="server-status-text">Connecting to Server...</span>
+      </div>
+
+      <button id="gemini-status-pill" class="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-indigo-500/10 border border-indigo-500/25 text-indigo-600 dark:text-indigo-300 hover:opacity-80 transition" title="Gemini AI Configuration">
+        <i data-lucide="cpu" class="w-3 h-3 text-indigo-400"></i>
+        <span id="gemini-status-text">Gemini Vision: Active</span>
+      </button>
+    </div>
+
+    <!-- Quick Access Titlebar Controls -->
+    <div class="flex items-center gap-1.5">
+      <!-- Theme Switcher -->
+      <button id="btn-theme-toggle" class="p-1.5 rounded hover:bg-slate-200 dark:hover:bg-white/10 text-slate-500 dark:text-slate-300 transition" title="Toggle Light/Dark Theme">
+        <i data-lucide="moon" class="w-3.5 h-3.5 hidden dark:block"></i>
+        <i data-lucide="sun" class="w-3.5 h-3.5 block dark:hidden"></i>
+      </button>
+
+      <!-- Keyboard Shortcuts -->
+      <button id="btn-shortcuts" class="p-1.5 rounded hover:bg-slate-200 dark:hover:bg-white/10 text-slate-500 dark:text-slate-300 transition" title="Keyboard Shortcuts">
+        <i data-lucide="keyboard" class="w-3.5 h-3.5"></i>
+      </button>
+
+      <!-- Settings Modal -->
+      <button id="btn-settings" class="p-1.5 rounded hover:bg-slate-200 dark:hover:bg-white/10 text-slate-500 dark:text-slate-300 transition" title="Studio Settings & API Keys">
+        <i data-lucide="settings" class="w-3.5 h-3.5"></i>
+      </button>
+
+      <!-- Undo / Redo -->
+      <div class="h-4 w-px bg-slate-300 dark:bg-white/10 mx-0.5"></div>
+      <button id="btn-undo-spots" class="p-1.5 rounded hover:bg-slate-200 dark:hover:bg-white/10 text-slate-500 dark:text-slate-300 transition" title="Undo (Ctrl+Z)">
+        <i data-lucide="undo-2" class="w-3.5 h-3.5"></i>
+      </button>
+      <button id="btn-redo-spots" class="p-1.5 rounded hover:bg-slate-200 dark:hover:bg-white/10 text-slate-500 dark:text-slate-300 transition" title="Redo (Ctrl+Y)">
+        <i data-lucide="redo-2" class="w-3.5 h-3.5"></i>
+      </button>
+
+      <!-- Primary Export Button -->
+      <button id="btn-export-main" class="ml-1 px-3 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold flex items-center gap-1.5 shadow-sm shadow-blue-600/30 transition disabled:opacity-40 disabled:cursor-not-allowed" disabled>
+        <i data-lucide="download" class="w-3.5 h-3.5"></i>
+        <span id="export-btn-label">Export Master</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ========================================================================= -->
+  <!-- 2. MS OFFICE-STYLE RIBBON TABS (TAB BAR)                                 -->
+  <!-- ========================================================================= -->
+  <nav class="h-8 studio-ribbon-tabs bg-slate-100 dark:bg-[#0c0f1a] border-b border-slate-200/80 dark:border-white/5 px-2 flex items-center gap-1 shrink-0 overflow-x-auto">
+    <button id="tab-btn-home" class="ribbon-tab active px-3 py-1 text-xs font-medium rounded-t flex items-center gap-1.5 transition" data-tab="home">
+      <i data-lucide="home" class="w-3.5 h-3.5"></i>
+      <span>Home & AI Scan</span>
+    </button>
+    <button id="tab-btn-blemish" class="ribbon-tab px-3 py-1 text-xs font-medium rounded-t flex items-center gap-1.5 transition" data-tab="blemish">
+      <i data-lucide="crosshair" class="w-3.5 h-3.5"></i>
+      <span>Blemishes & Healing</span>
+    </button>
+    <button id="tab-btn-skin" class="ribbon-tab px-3 py-1 text-xs font-medium rounded-t flex items-center gap-1.5 transition" data-tab="skin">
+      <i data-lucide="wand-2" class="w-3.5 h-3.5"></i>
+      <span>Skin Smoothing & Tone</span>
+    </button>
+    <button id="tab-btn-features" class="ribbon-tab px-3 py-1 text-xs font-medium rounded-t flex items-center gap-1.5 transition" data-tab="features">
+      <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>
+      <span>Eyes, Teeth & Shine</span>
+    </button>
+    <button id="tab-btn-view" class="ribbon-tab px-3 py-1 text-xs font-medium rounded-t flex items-center gap-1.5 transition" data-tab="view">
+      <i data-lucide="eye" class="w-3.5 h-3.5"></i>
+      <span>View & Zoom</span>
+    </button>
+  </nav>
+
+  <!-- ========================================================================= -->
+  <!-- 3. MS OFFICE-STYLE RIBBON TOOLBARS (CONTENT BY TAB)                      -->
+  <!-- ========================================================================= -->
+  <div class="h-24 studio-ribbon-content bg-white dark:bg-[#111625] border-b border-slate-200 dark:border-white/10 px-3 py-1.5 flex items-center shrink-0 overflow-x-auto overflow-y-hidden shadow-sm">
+
+    <!-- TAB 1: HOME & AI SCAN RIBBON PANEL -->
+    <div id="ribbon-panel-home" class="ribbon-panel flex items-center gap-3 h-full">
+      <!-- Group: Image Loading -->
+      <div class="ribbon-group flex flex-col justify-between h-full pr-3 border-r border-slate-200 dark:border-white/10">
+        <div class="flex items-center gap-1.5">
+          <input type="file" id="file-input" accept="image/png, image/jpeg, image/webp" class="hidden">
+          <button id="btn-browse-file" class="ribbon-btn-large flex flex-col items-center justify-center px-2 py-1 rounded hover:bg-slate-100 dark:hover:bg-white/5 text-slate-700 dark:text-slate-200 transition">
+            <i data-lucide="folder-open" class="w-5 h-5 text-blue-500 mb-0.5"></i>
+            <span class="text-[10px] font-medium">Open Image</span>
+          </button>
+          <button id="btn-reset-image" class="ribbon-btn-large flex flex-col items-center justify-center px-2 py-1 rounded hover:bg-slate-100 dark:hover:bg-white/5 text-slate-700 dark:text-slate-200 transition">
+            <i data-lucide="refresh-cw" class="w-5 h-5 text-slate-400 mb-0.5"></i>
+            <span class="text-[10px] font-medium">Reset</span>
+          </button>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">Image</span>
+      </div>
+
+      <!-- Group: AI Portrait Scan (Hero) -->
+      <div class="ribbon-group flex flex-col justify-between h-full pr-3 border-r border-slate-200 dark:border-white/10">
+        <div class="flex items-center gap-2">
+          <button id="btn-analyze" class="h-12 px-3.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs flex items-center gap-2 shadow-sm shadow-blue-600/30 transition disabled:opacity-40 disabled:cursor-not-allowed" disabled>
+            <i data-lucide="scan-face" class="w-5 h-5"></i>
+            <div class="text-left">
+              <div id="btn-analyze-text" class="leading-tight">AI Portrait Analysis</div>
+              <div class="text-[9px] font-normal text-blue-200">Segment & Detect Spots</div>
+            </div>
+          </button>
+          <div class="flex flex-col justify-center space-y-0.5 w-24">
+            <div class="flex justify-between text-[10px] text-slate-400">
+              <span class="flex items-center gap-1"><i data-lucide="sliders-horizontal" class="w-3 h-3 text-slate-400"></i> Sens.</span>
+              <span id="val-sensitivity" class="font-mono text-blue-400">50%</span>
+            </div>
+            <input type="range" id="slider-sensitivity" min="10" max="100" value="50" class="w-full">
+          </div>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">BiSeNet & Vision VLM</span>
+      </div>
+
+      <!-- Group: Skin Tone Sampler -->
+      <div class="ribbon-group flex flex-col justify-between h-full pr-3 border-r border-slate-200 dark:border-white/10">
+        <div class="flex items-center gap-2">
+          <button id="tool-btn-eyedropper" class="tool-btn flex flex-col items-center justify-center px-2 py-1 rounded hover:bg-slate-100 dark:hover:bg-white/5 text-slate-700 dark:text-slate-200 transition" title="Click skin to sample baseline tone">
+            <i data-lucide="pipette" class="w-4 h-4 text-amber-500 mb-0.5"></i>
+            <span class="text-[10px] font-medium">Tone Sampler</span>
+          </button>
+          <div id="label-skin-tone-container" class="flex flex-col justify-center text-[10px] font-mono" style="display: none;">
+            <div class="flex items-center gap-1.5">
+              <div id="tone-swatch-bottom" class="w-3.5 h-3.5 rounded-full border border-slate-300 dark:border-white/20" style="background-color: #d8a483;"></div>
+              <span id="label-skin-tone-text" class="text-slate-300 font-medium">Sampled</span>
+            </div>
+            <span class="text-[9px] text-slate-400">Fitzpatrick Base</span>
+          </div>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">Complexion</span>
+      </div>
+
+      <!-- Group: AI Prompt Refinement -->
+      <div class="ribbon-group flex flex-col justify-between h-full pr-3 border-r border-slate-200 dark:border-white/10">
+        <div class="flex flex-col gap-1 w-64">
+          <div class="flex items-center gap-1">
+            <input type="text" id="input-prompt" placeholder="e.g. keep beauty mark on cheek" class="flex-1 studio-input rounded px-2 py-0.5 text-xs outline-none">
+            <button id="btn-send-prompt" class="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium flex items-center gap-1 transition">
+              <i data-lucide="send" class="w-3 h-3"></i>
+              <span>Send</span>
+            </button>
+          </div>
+          <div class="flex items-center gap-1 overflow-x-auto py-0.5">
+            <button class="prompt-chip px-1.5 py-0.2 rounded bg-slate-100 dark:bg-slate-800 text-[9px] text-slate-400 hover:text-white border border-slate-300 dark:border-white/5" data-prompt="keep beauty marks">Keep Marks</button>
+            <button class="prompt-chip px-1.5 py-0.2 rounded bg-slate-100 dark:bg-slate-800 text-[9px] text-slate-400 hover:text-white border border-slate-300 dark:border-white/5" data-prompt="cheeks only">Cheeks Only</button>
+            <button class="prompt-chip px-1.5 py-0.2 rounded bg-slate-100 dark:bg-slate-800 text-[9px] text-slate-400 hover:text-white border border-slate-300 dark:border-white/5" data-prompt="select all">Select All</button>
+          </div>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">Gemini Natural Language</span>
+      </div>
+
+      <!-- Group: Studio Presets -->
+      <div class="ribbon-group flex flex-col justify-between h-full">
+        <div class="flex items-center gap-2">
+          <div class="flex flex-col">
+            <label class="text-[10px] text-slate-400 mb-0.5 flex items-center gap-1">
+              <i data-lucide="palette" class="w-3 h-3 text-purple-400"></i>
+              <span>Studio Preset</span>
+            </label>
+            <select id="select-preset" class="studio-input text-xs rounded px-2 py-1 outline-none cursor-pointer font-medium">
+              <option value="custom">Preset: Custom</option>
+              <option value="natural">Natural Portrait</option>
+              <option value="commercial">Commercial Glamour</option>
+              <option value="matte">Matte Editorial</option>
+            </select>
+          </div>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">Presets</span>
+      </div>
+    </div>
+
+    <!-- TAB 2: BLEMISHES & HEALING RIBBON PANEL -->
+    <div id="ribbon-panel-blemish" class="ribbon-panel hidden flex items-center gap-3 h-full">
+      <!-- Group: AI Detection Scan (Explicit User Trigger) -->
+      <div class="ribbon-group flex flex-col justify-between h-full pr-3 border-r border-slate-200 dark:border-white/10">
+        <div class="flex items-center gap-2">
+          <button id="btn-analyze-blemish" class="h-12 px-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs flex items-center gap-2 shadow-sm shadow-blue-600/30 transition disabled:opacity-40 disabled:cursor-not-allowed" disabled>
+            <i data-lucide="scan-face" class="w-4 h-4"></i>
+            <div class="text-left">
+              <div id="btn-analyze-blemish-text" class="leading-tight">Detect Blemishes</div>
+              <div class="text-[9px] font-normal text-blue-200">Run AI Analysis</div>
+            </div>
+          </button>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">AI Acne Scan</span>
+      </div>
+
+      <!-- Group: Spot Interactive Modes -->
+      <div class="ribbon-group flex flex-col justify-between h-full pr-3 border-r border-slate-200 dark:border-white/10">
+        <div class="flex items-center gap-1 bg-slate-100 dark:bg-slate-900/80 p-0.5 rounded-lg border border-slate-200 dark:border-white/10">
+          <button id="tool-btn-blemish" class="tool-btn px-2.5 py-1 rounded bg-blue-600 text-white text-[11px] font-medium flex items-center gap-1 shadow-sm" title="Activate Blemish Tool">
+            <i data-lucide="target" class="w-3.5 h-3.5"></i>
+            <span>Blemish Tool</span>
+          </button>
+          <div class="h-4 w-px bg-slate-300 dark:bg-white/10"></div>
+          <button id="btn-mode-toggle" class="spot-mode-btn px-2 py-1 rounded text-[11px] font-medium text-slate-300 hover:text-white flex items-center gap-1" title="Toggle Spot Active/Preserved (T)">
+            <i data-lucide="check-circle-2" class="w-3 h-3 text-emerald-400"></i>
+            <span>Toggle</span>
+          </button>
+          <button id="btn-mode-add" class="spot-mode-btn px-2 py-1 rounded text-[11px] font-medium text-slate-300 hover:text-white flex items-center gap-1" title="Click skin to add spot (A)">
+            <i data-lucide="plus-circle" class="w-3 h-3 text-blue-400"></i>
+            <span>Add (+)</span>
+          </button>
+          <button id="btn-mode-erase" class="spot-mode-btn px-2 py-1 rounded text-[11px] font-medium text-slate-300 hover:text-rose-400 flex items-center gap-1" title="Click or drag to delete spots (E)">
+            <i data-lucide="trash-2" class="w-3 h-3 text-rose-400"></i>
+            <span>Erase (-)</span>
+          </button>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">Interactive Spot Modes</span>
+      </div>
+
+      <!-- Group: Spot Brush Radius -->
+      <div class="ribbon-group flex flex-col justify-between h-full pr-3 border-r border-slate-200 dark:border-white/10">
+        <div class="flex items-center gap-2">
+          <div class="flex items-center gap-1 bg-slate-100 dark:bg-slate-900/80 px-2 py-1 rounded border border-slate-200 dark:border-white/10 text-xs font-mono">
+            <span class="text-slate-400 text-[10px]">Radius:</span>
+            <button id="btn-spot-radius-dec" class="px-1 font-bold text-slate-300 hover:text-blue-400">-</button>
+            <span id="label-spot-radius-toolbar" class="w-6 text-center text-blue-400 font-semibold">6px</span>
+            <button id="btn-spot-radius-inc" class="px-1 font-bold text-slate-300 hover:text-blue-400">+</button>
+          </div>
+          <div class="w-20">
+            <input type="range" id="slider-spot-radius" min="3" max="18" value="6" class="w-full">
+          </div>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">Brush Size ([ / ])</span>
+      </div>
+
+      <!-- Group: Overlap & Cluster Cleanup -->
+      <div class="ribbon-group flex flex-col justify-between h-full pr-3 border-r border-slate-200 dark:border-white/10">
+        <div class="flex items-center gap-1.5">
+          <button id="btn-clean-overlaps" class="px-2.5 py-1.5 rounded bg-blue-500/15 hover:bg-blue-600 hover:text-white border border-blue-500/30 text-blue-400 text-[11px] font-medium flex items-center gap-1 transition" title="Auto-Merge Concentric Duplicate Circles (M)">
+            <i data-lucide="layers" class="w-3.5 h-3.5"></i>
+            <span>Merge Overlaps</span>
+          </button>
+          <div class="flex flex-col gap-0.5">
+            <button id="btn-spots-select-all" class="px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-[10px] text-slate-300 hover:text-white border border-slate-300 dark:border-white/5 flex items-center gap-1">
+              <i data-lucide="check-square" class="w-2.5 h-2.5 text-blue-400"></i> Select All
+            </button>
+            <button id="btn-spots-deselect-all" class="px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-[10px] text-slate-300 hover:text-white border border-slate-300 dark:border-white/5 flex items-center gap-1">
+              <i data-lucide="square" class="w-2.5 h-2.5 text-slate-400"></i> Deselect
+            </button>
+          </div>
+          <button id="btn-spots-clear-all" class="px-2 py-1.5 rounded bg-rose-500/15 hover:bg-rose-600 hover:text-white border border-rose-500/30 text-rose-400 text-[11px] font-medium flex items-center gap-1 transition" title="Clear All Spots">
+            <i data-lucide="x-circle" class="w-3.5 h-3.5"></i>
+            <span>Clear</span>
+          </button>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">Batch Operations</span>
+      </div>
+
+      <!-- Group: Healing Engine -->
+      <div class="ribbon-group flex flex-col justify-between h-full pr-3 border-r border-slate-200 dark:border-white/10">
+        <div class="flex items-center gap-2">
+          <div class="flex flex-col">
+            <label class="text-[9px] text-slate-400 flex items-center gap-1">
+              <i data-lucide="activity" class="w-3 h-3 text-cyan-400"></i>
+              <span>Heal Engine</span>
+            </label>
+            <select id="select-heal-mode" class="studio-input text-xs rounded px-2 py-0.5 outline-none font-medium cursor-pointer">
+              <option value="full_inpaint">Full Inpaint (LaMa)</option>
+              <option value="calm_redness">Calm Erythema</option>
+              <option value="flatten_bump">Flatten Bump</option>
+            </select>
+          </div>
+          <div class="flex flex-col gap-1 text-[10px] pt-1">
+            <label class="flex items-center gap-1 cursor-pointer">
+              <input type="checkbox" id="chk-preserve-moles" checked class="w-3 h-3 rounded text-blue-600">
+              <span class="text-slate-300 flex items-center gap-1"><i data-lucide="shield" class="w-3 h-3 text-blue-400"></i> Keep Moles</span>
+            </label>
+            <label class="flex items-center gap-1 cursor-pointer">
+              <input type="checkbox" id="chk-preserve-freckles" class="w-3 h-3 rounded text-blue-600">
+              <span class="text-slate-300 flex items-center gap-1"><i data-lucide="sparkle" class="w-3 h-3 text-amber-400"></i> Keep Freckles</span>
+            </label>
+          </div>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">Simple-LaMa & Preservation</span>
+      </div>
+
+      <!-- Group: Overlays (Show Spots & Skin Mask) -->
+      <div class="ribbon-group flex flex-col justify-between h-full pr-3 border-r border-slate-200 dark:border-white/10">
+        <div class="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900/80 p-1 rounded-lg border border-slate-200 dark:border-white/10">
+          <button id="btn-toggle-spots-blemish" class="px-2 py-1 rounded bg-blue-600/20 text-blue-400 border border-blue-500/40 text-[11px] font-medium flex items-center gap-1 hover:bg-blue-600 hover:text-white transition shadow-sm" title="Toggle Spots Overlay visibility">
+            <i data-lucide="eye" class="w-3.5 h-3.5"></i>
+            <span>Show Spots</span>
+          </button>
+          <button id="btn-toggle-skin-blemish" class="px-2 py-1 rounded text-slate-400 hover:text-white text-[11px] font-medium flex items-center gap-1 transition" title="Toggle Blue Skin Segmentation Mask">
+            <i data-lucide="scan" class="w-3.5 h-3.5"></i>
+            <span>Skin Mask</span>
+          </button>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">Display Overlays</span>
+      </div>
+
+      <!-- Group: Selected Spot Inspector -->
+      <div id="spot-inspector-card" class="hidden ribbon-group flex flex-col justify-between h-full px-2 py-0.5 rounded bg-blue-500/10 border border-blue-500/30">
+        <div class="flex items-center gap-2">
+          <div class="flex flex-col text-[10px] font-mono">
+            <span id="label-inspector-spot-id" class="font-bold text-blue-400">Spot #1</span>
+            <span id="label-inspector-coords" class="text-slate-400">X: 0, Y: 0</span>
+          </div>
+          <div class="flex flex-col w-16">
+            <span id="val-inspector-radius" class="text-[9px] font-mono text-blue-400">6 px</span>
+            <input type="range" id="slider-inspector-radius" min="3" max="18" value="6" class="w-full">
+          </div>
+          <button id="btn-inspector-toggle" class="p-1 rounded bg-slate-800 text-emerald-400 hover:bg-slate-700" title="Toggle Spot">
+            <i data-lucide="check-circle-2" class="w-3.5 h-3.5"></i>
+          </button>
+          <button id="btn-inspector-delete" class="p-1 rounded bg-rose-600 hover:bg-rose-500 text-white" title="Delete Spot">
+            <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+          </button>
+          <button id="btn-inspector-close" class="p-1 text-slate-400 hover:text-white" title="Close Inspector">
+            <i data-lucide="x" class="w-3 h-3"></i>
+          </button>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-blue-400 font-medium">Selected Spot Inspector</span>
+      </div>
+    </div>
+
+    <!-- TAB 3: SKIN & TONE RIBBON PANEL -->
+    <div id="ribbon-panel-skin" class="ribbon-panel hidden flex items-center gap-4 h-full">
+      <!-- Group: Dodge & Burn -->
+      <div class="ribbon-group flex flex-col justify-between h-full pr-3 border-r border-slate-200 dark:border-white/10">
+        <div class="flex items-center gap-3">
+          <label class="flex items-center gap-1.5 cursor-pointer">
+            <input type="checkbox" id="chk-db" checked class="w-3.5 h-3.5 rounded text-blue-600">
+            <span class="text-xs font-semibold text-slate-200 flex items-center gap-1">
+              <i data-lucide="sun-medium" class="w-3.5 h-3.5 text-amber-400"></i>
+              <span>AI Dodge & Burn</span>
+            </span>
+          </label>
+          <div class="flex flex-col w-28">
+            <div class="flex justify-between text-[10px] text-slate-400">
+              <span>Intensity</span>
+              <span id="val-db-strength" class="font-mono text-blue-400">40%</span>
+            </div>
+            <input type="range" id="slider-db-strength" min="0" max="100" value="40" class="w-full">
+          </div>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">Micro-Contrast Evening</span>
+      </div>
+
+      <!-- Group: Frequency Separation Smoothing -->
+      <div class="ribbon-group flex flex-col justify-between h-full pr-3 border-r border-slate-200 dark:border-white/10">
+        <div class="flex items-center gap-3">
+          <label class="flex items-center gap-1.5 cursor-pointer">
+            <input type="checkbox" id="chk-smooth" checked class="w-3.5 h-3.5 rounded text-blue-600">
+            <span class="text-xs font-semibold text-slate-200 flex items-center gap-1">
+              <i data-lucide="feather" class="w-3.5 h-3.5 text-emerald-400"></i>
+              <span>Skin Smoothing</span>
+            </span>
+          </label>
+          <div class="flex flex-col w-24">
+            <div class="flex justify-between text-[10px] text-slate-400">
+              <span>Smooth</span>
+              <span id="val-smooth-strength" class="font-mono text-blue-400">45%</span>
+            </div>
+            <input type="range" id="slider-smooth-strength" min="0" max="100" value="45" class="w-full">
+          </div>
+          <div class="flex flex-col w-24">
+            <div class="flex justify-between text-[10px] text-slate-400">
+              <span>Texture</span>
+              <span id="val-texture-keep" class="font-mono text-blue-400">40%</span>
+            </div>
+            <input type="range" id="slider-texture-keep" min="5" max="100" value="40" class="w-full">
+          </div>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">Frequency Separation</span>
+      </div>
+
+      <!-- Group: Tone Balancing & Lift -->
+      <div class="ribbon-group flex flex-col justify-between h-full">
+        <div class="flex items-center gap-3">
+          <label class="flex items-center gap-1.5 cursor-pointer">
+            <input type="checkbox" id="chk-lighten" checked class="w-3.5 h-3.5 rounded text-blue-600">
+            <span class="text-xs font-semibold text-slate-200 flex items-center gap-1">
+              <i data-lucide="sparkles" class="w-3.5 h-3.5 text-purple-400"></i>
+              <span>Tone Balancing</span>
+            </span>
+          </label>
+          <div class="flex flex-col w-28">
+            <div class="flex justify-between text-[10px] text-slate-400">
+              <span>Lift</span>
+              <span id="val-lighten-strength" class="font-mono text-blue-400">35%</span>
+            </div>
+            <input type="range" id="slider-lighten-strength" min="0" max="100" value="35" class="w-full">
+          </div>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">Relative Luminance</span>
+      </div>
+    </div>
+
+    <!-- TAB 4: FEATURES & FINISH RIBBON PANEL -->
+    <div id="ribbon-panel-features" class="ribbon-panel hidden flex items-center gap-4 h-full">
+      <!-- Group: Dental Teeth Whitening -->
+      <div class="ribbon-group flex flex-col justify-between h-full pr-3 border-r border-slate-200 dark:border-white/10">
+        <div class="flex items-center gap-3">
+          <button id="btn-detect-teeth" class="h-12 px-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs flex items-center gap-2 shadow-sm shadow-blue-600/30 transition disabled:opacity-40 disabled:cursor-not-allowed">
+            <i data-lucide="sparkle" class="w-4 h-4 text-amber-300"></i>
+            <div class="text-left">
+              <div id="btn-detect-teeth-text" class="leading-tight">Detect & Whiten</div>
+              <div class="text-[9px] font-normal text-blue-200">Enamel Whitening</div>
+            </div>
+          </button>
+          <div class="flex flex-col">
+            <label class="flex items-center gap-1.5 cursor-pointer pb-1">
+              <input type="checkbox" id="chk-eyes-teeth" class="w-3.5 h-3.5 rounded text-blue-600">
+              <span class="text-xs font-semibold text-slate-200 flex items-center gap-1">
+                <span>Active</span>
+              </span>
+            </label>
+            <div class="flex flex-col w-28">
+              <div class="flex justify-between text-[10px] text-slate-400">
+                <span>Whiten</span>
+                <span id="val-teeth" class="font-mono text-blue-400">65%</span>
+              </div>
+              <input type="range" id="slider-teeth" min="0" max="100" value="65" class="w-full">
+            </div>
+          </div>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">Dental Enamel Bleach</span>
+      </div>
+
+      <!-- Group: Eyes Brightener -->
+      <div class="ribbon-group flex flex-col justify-between h-full pr-3 border-r border-slate-200 dark:border-white/10">
+        <div class="flex items-center gap-3">
+          <div class="flex flex-col w-24">
+            <div class="flex justify-between text-[10px] text-slate-400">
+              <span class="flex items-center gap-1"><i data-lucide="eye" class="w-3 h-3 text-cyan-400"></i> Eyes</span>
+              <span id="val-eyes" class="font-mono text-blue-400">45%</span>
+            </div>
+            <input type="range" id="slider-eyes" min="0" max="100" value="45" class="w-full">
+          </div>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">Sclera & Iris Sparkle</span>
+      </div>
+
+      <!-- Group: Shine & Glare Neutralizer -->
+      <div class="ribbon-group flex flex-col justify-between h-full pr-3 border-r border-slate-200 dark:border-white/10">
+        <div class="flex items-center gap-3">
+          <label class="flex items-center gap-1.5 cursor-pointer">
+            <input type="checkbox" id="chk-shine" class="w-3.5 h-3.5 rounded text-blue-600">
+            <span class="text-xs font-semibold text-slate-200 flex items-center gap-1">
+              <i data-lucide="shield-off" class="w-3.5 h-3.5 text-teal-400"></i>
+              <span>Shine Neutralizer</span>
+            </span>
+          </label>
+          <div class="flex flex-col w-28">
+            <div class="flex justify-between text-[10px] text-slate-400">
+              <span>Anti-Glare</span>
+              <span id="val-shine" class="font-mono text-blue-400">40%</span>
+            </div>
+            <input type="range" id="slider-shine" min="0" max="100" value="40" class="w-full">
+          </div>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">T-Zone Anti-Glare</span>
+      </div>
+
+      <!-- Group: Pore Texture Blend -->
+      <div class="ribbon-group flex flex-col justify-between h-full">
+        <div class="flex items-center gap-2">
+          <div class="flex flex-col w-28">
+            <div class="flex justify-between text-[10px] text-slate-400">
+              <span class="flex items-center gap-1"><i data-lucide="disc" class="w-3 h-3 text-slate-400"></i> Pore Blend</span>
+              <span id="val-texture-blend" class="font-mono text-blue-400">25%</span>
+            </div>
+            <input type="range" id="slider-texture-blend" min="0" max="100" value="25" class="w-full">
+          </div>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">Finishing Texture</span>
+      </div>
+    </div>
+
+    <!-- TAB 5: VIEW & ZOOM RIBBON PANEL -->
+    <div id="ribbon-panel-view" class="ribbon-panel hidden flex items-center gap-4 h-full">
+      <!-- Group: Comparison Mode -->
+      <div class="ribbon-group flex flex-col justify-between h-full pr-3 border-r border-slate-200 dark:border-white/10">
+        <div class="flex items-center gap-1 bg-slate-100 dark:bg-slate-900/80 p-0.5 rounded border border-slate-200 dark:border-white/10 text-xs">
+          <button id="view-mode-split" class="px-2.5 py-1 rounded bg-blue-600 text-white font-medium flex items-center gap-1 shadow-sm">
+            <i data-lucide="columns-2" class="w-3.5 h-3.5"></i>
+            <span>Split Slider</span>
+          </button>
+          <button id="view-mode-after" class="px-2.5 py-1 rounded text-slate-400 hover:text-white flex items-center gap-1">
+            <i data-lucide="image" class="w-3 h-3"></i>
+            <span>After</span>
+          </button>
+          <button id="view-mode-before" class="px-2.5 py-1 rounded text-slate-400 hover:text-white flex items-center gap-1">
+            <i data-lucide="history" class="w-3 h-3"></i>
+            <span>Before</span>
+          </button>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">Comparison Mode</span>
+      </div>
+
+      <!-- Group: Visual Overlays -->
+      <div class="ribbon-group flex flex-col justify-between h-full pr-3 border-r border-slate-200 dark:border-white/10">
+        <div class="flex items-center gap-3 text-xs">
+          <label class="flex items-center gap-1.5 cursor-pointer">
+            <input type="checkbox" id="chk-show-spots" checked class="w-3.5 h-3.5 rounded text-blue-600">
+            <span class="text-slate-300 flex items-center gap-1"><i data-lucide="crosshair" class="w-3 h-3 text-rose-400"></i> Show Spots</span>
+          </label>
+          <label class="flex items-center gap-1.5 cursor-pointer">
+            <input type="checkbox" id="chk-show-skin-mask" class="w-3.5 h-3.5 rounded text-blue-600">
+            <span class="text-slate-300 flex items-center gap-1"><i data-lucide="layers" class="w-3 h-3 text-blue-400"></i> Show Mask</span>
+          </label>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">Overlays</span>
+      </div>
+
+      <!-- Group: Zoom & Canvas Navigation -->
+      <div class="ribbon-group flex flex-col justify-between h-full">
+        <div class="flex items-center gap-1 text-xs">
+          <button id="btn-zoom-fit" class="px-2 py-1 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-700 text-slate-300 flex items-center gap-1">
+            <i data-lucide="maximize" class="w-3 h-3"></i>
+            <span>Fit (F)</span>
+          </button>
+          <button id="btn-zoom-out" class="p-1 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-700 text-slate-300" title="Zoom Out">
+            <i data-lucide="zoom-out" class="w-3.5 h-3.5"></i>
+          </button>
+          <span id="label-zoom-level" class="w-10 text-center font-mono text-[11px] text-blue-400 font-medium">100%</span>
+          <button id="btn-zoom-in" class="p-1 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-700 text-slate-300" title="Zoom In">
+            <i data-lucide="zoom-in" class="w-3.5 h-3.5"></i>
+          </button>
+        </div>
+        <span class="ribbon-group-label text-[9px] text-center text-slate-400 font-medium">Focal Zoom & Pan</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========================================================================= -->
+  <!-- 4. FULL-SCREEN RESPONSIVE CANVAS VIEWPORT STAGE                          -->
+  <!-- ========================================================================= -->
+  <main id="viewport-stage" class="flex-1 w-full h-full relative overflow-hidden bg-[#07090e] viewport-grid">
+
+    <!-- Upload Dropzone (When No Photo Loaded) -->
+    <div id="upload-dropzone"
+      class="upload-dropzone-card absolute inset-4 sm:inset-8 md:inset-16 m-auto max-w-lg max-h-[360px] rounded-2xl flex flex-col items-center justify-center p-8 text-center cursor-pointer transition-all duration-200 z-10 backdrop-blur-md group shadow-2xl">
+      <div
+        class="w-16 h-16 rounded-2xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400 group-hover:scale-110 group-hover:bg-blue-600 group-hover:text-white transition-all duration-300 shadow-lg shadow-blue-500/15 mb-3">
+        <i data-lucide="image-plus" class="w-8 h-8"></i>
+      </div>
+      <h3 class="text-base font-semibold text-slate-800 dark:text-white mb-1">Upload Portrait Photograph</h3>
+      <p class="text-xs text-slate-500 dark:text-slate-400 max-w-sm mb-4">Drag and drop high-res portrait (RAW, JPEG, PNG, WEBP), or click to browse</p>
+      <button id="btn-browse-file-center"
+        class="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md shadow-blue-600/25 flex items-center gap-2 transition">
+        <i data-lucide="folder-open" class="w-4 h-4"></i>
+        <span>Choose Image File</span>
+      </button>
+      <div class="flex flex-wrap justify-center items-center gap-3 mt-5 text-[11px] font-mono text-slate-400">
+        <span class="flex items-center gap-1"><i data-lucide="check" class="w-3 h-3 text-emerald-500"></i> Facial Detection</span>
+        <span class="flex items-center gap-1"><i data-lucide="check" class="w-3 h-3 text-emerald-500"></i> Simple-LaMa</span>
+        <span class="flex items-center gap-1"><i data-lucide="check" class="w-3 h-3 text-emerald-500"></i> Non-Destructive</span>
+      </div>
+    </div>
+
+    <!-- Interactive Canvas Container (Zoom, Pan, Split) -->
+    <div id="canvas-container" class="hidden absolute top-0 left-0 m-0 p-0 select-none shadow-2xl origin-top-left pointer-events-auto">
+      <!-- 1. Master Original Image (Before) -->
+      <canvas id="canvas-before" class="block absolute top-0 left-0 w-full h-full pointer-events-none"></canvas>
+
+      <!-- 2. AI Retouched Result Image (After, Clipped by Split Slider) -->
+      <canvas id="canvas-after" class="block absolute top-0 left-0 w-full h-full pointer-events-none" style="clip-path: polygon(0 0, 50% 0, 50% 100%, 0 100%); -webkit-clip-path: polygon(0 0, 50% 0, 50% 100%, 0 100%);"></canvas>
+
+      <!-- 3. Interactive Spot Overlay Canvas -->
+      <canvas id="canvas-overlay" class="block absolute top-0 left-0 w-full h-full pointer-events-auto"></canvas>
+
+      <!-- 4. Split Slider Line & Handle -->
+      <div id="split-divider" class="split-divider cursor-ew-resize pointer-events-auto" style="left: 50%;">
+        <div id="split-handle" class="split-handle" title="Drag left/right to compare Before & After">
+          <i data-lucide="chevrons-left-right" class="w-4 h-4"></i>
+        </div>
+      </div>
+    </div>
+
+    <!-- Processing Badge Indicator -->
+    <div id="processing-badge" class="hidden absolute top-4 left-4 studio-card px-3.5 py-2 rounded-xl flex items-center gap-2.5 shadow-lg z-40 border border-blue-500/30">
+      <div class="spinner-ring w-4 h-4"></div>
+      <span id="processing-badge-text" class="text-xs font-medium text-blue-400">Rendering AI Retouch...</span>
+    </div>
+
+    <!-- Hover Spot Tooltip -->
+    <div id="spot-tooltip" class="hidden absolute pointer-events-none studio-panel px-2.5 py-1 rounded-lg text-[11px] text-white shadow-lg z-50 border border-white/10 font-medium">
+      <span id="spot-tooltip-text">Acne Spot</span>
+    </div>
+  </main>
+
+  <!-- ========================================================================= -->
+  <!-- 5. BOTTOM STATUS BAR                                                     -->
+  <!-- ========================================================================= -->
+  <footer class="h-6 studio-titlebar border-t border-slate-200/10 dark:border-white/10 px-3 flex items-center justify-between text-[11px] text-slate-400 z-30 font-mono shrink-0">
+    <div class="flex items-center gap-4">
+      <span id="label-image-dim">No Image Loaded</span>
+      <span id="label-spots-count" class="text-rose-400 font-sans font-medium">0 Spots</span>
+    </div>
+    <div class="flex items-center gap-3">
+      <span id="label-render-time">Latency: 0ms</span>
+      <span class="text-slate-600">|</span>
+      <span class="text-emerald-400 font-sans flex items-center gap-1">
+        <i data-lucide="shield-check" class="w-3 h-3"></i>
+        <span>100% Identity Safe</span>
+      </span>
+    </div>
+  </footer>
+
+  <!-- ========================================================================= -->
+  <!-- 6. CUSTOM TOAST NOTIFICATION CONTAINER (ZERO NATIVE ALERTS)              -->
+  <!-- ========================================================================= -->
+  <div id="toast-container" class="fixed top-12 right-4 z-50 flex flex-col gap-2 pointer-events-none max-w-sm"></div>
+
+  <!-- ========================================================================= -->
+  <!-- 7. CUSTOM MODAL DIALOG (ZERO NATIVE CONFIRM / PROMPT)                   -->
+  <!-- ========================================================================= -->
+  <div id="modal-custom-dialog" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/65 backdrop-blur-sm">
+    <div class="w-full max-w-sm studio-card rounded-2xl p-5 border border-white/15 space-y-4 shadow-2xl">
+      <div class="flex items-start gap-3">
+        <div id="dialog-icon-container" class="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 bg-blue-500/15 text-blue-400 border border-blue-500/30">
+          <i id="dialog-icon" data-lucide="info" class="w-5 h-5"></i>
+        </div>
+        <div class="space-y-1 flex-1">
+          <h3 id="dialog-title" class="text-sm font-semibold text-white">Confirmation</h3>
+          <p id="dialog-message" class="text-xs text-slate-300 leading-relaxed">Please confirm this action.</p>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 pt-2 border-t border-white/10">
+        <button id="btn-dialog-cancel" class="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs transition">Cancel</button>
+        <button id="btn-dialog-confirm" class="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow-sm transition">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="modal-settings" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+    <div class="w-full max-w-md studio-card rounded-2xl p-5 border border-white/10 space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <i data-lucide="settings" class="w-4 h-4 text-blue-400"></i>
+          <h3 class="text-sm font-semibold text-white">Studio Settings</h3>
+        </div>
+        <button id="btn-close-settings" class="p-1 rounded hover:bg-white/10 text-slate-400 hover:text-white">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <div>
+          <label class="block text-slate-300 font-medium mb-1">Color Theme & Aesthetics</label>
+          <select id="select-theme-palette" class="w-full studio-input rounded-lg px-3 py-2 outline-none text-xs font-medium cursor-pointer">
+            <option value="dark">Dark Studio (Classic Deep Obsidian)</option>
+            <option value="light">Clean Light (Office Fluent Slate)</option>
+            <option value="midnight">Midnight OLED (True Black & Cyan)</option>
+            <option value="nordic">Nordic Frost (Arctic Slate & Emerald)</option>
+            <option value="sepia">Editorial Sepia (Warm Sand & Amber)</option>
+            <option value="cyberpunk">Cyber Neon (Deep Indigo & Violet)</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-slate-300 font-medium mb-1">Gemini Vision AI Key</label>
+          <input type="password" id="input-api-key" placeholder="AIzaSy..." class="w-full studio-input rounded-lg px-3 py-2 outline-none font-mono text-xs">
+        </div>
+        <div>
+          <label class="block text-slate-300 font-medium mb-1">Local Backend Server URL</label>
+          <input type="text" id="input-server-url" value="http://127.0.0.1:8765" class="w-full studio-input rounded-lg px-3 py-2 outline-none font-mono text-xs">
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-2 pt-2 border-t border-white/5">
+        <button id="btn-save-settings" class="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs shadow-sm">Save Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Keyboard Shortcuts Modal -->
+  <div id="modal-shortcuts" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+    <div class="w-full max-w-md studio-card rounded-2xl p-5 border border-white/10 space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <i data-lucide="keyboard" class="w-4 h-4 text-blue-400"></i>
+          <h3 class="text-sm font-semibold text-white">Keyboard Shortcuts</h3>
+        </div>
+        <button id="btn-close-shortcuts" class="p-1 rounded hover:bg-white/10 text-slate-400 hover:text-white">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+
+      <div class="grid grid-cols-2 gap-2 text-xs">
+        <div class="flex justify-between p-2 rounded bg-slate-900/60 border border-white/5">
+          <span class="text-slate-400">Toggle Spot Mode</span>
+          <kbd class="shortcut-badge">T</kbd>
+        </div>
+        <div class="flex justify-between p-2 rounded bg-slate-900/60 border border-white/5">
+          <span class="text-slate-400">Add Spot Mode</span>
+          <kbd class="shortcut-badge">A</kbd>
+        </div>
+        <div class="flex justify-between p-2 rounded bg-slate-900/60 border border-white/5">
+          <span class="text-slate-400">Erase Spot Mode</span>
+          <kbd class="shortcut-badge">E</kbd>
+        </div>
+        <div class="flex justify-between p-2 rounded bg-slate-900/60 border border-white/5">
+          <span class="text-slate-400">Merge Overlaps</span>
+          <kbd class="shortcut-badge">M</kbd>
+        </div>
+        <div class="flex justify-between p-2 rounded bg-slate-900/60 border border-white/5">
+          <span class="text-slate-400">Brush Size Down/Up</span>
+          <kbd class="shortcut-badge">[ / ]</kbd>
+        </div>
+        <div class="flex justify-between p-2 rounded bg-slate-900/60 border border-white/5">
+          <span class="text-slate-400">Instant Delete Spot</span>
+          <span class="text-slate-300 font-mono text-[10px]">Right-Click</span>
+        </div>
+        <div class="flex justify-between p-2 rounded bg-slate-900/60 border border-white/5">
+          <span class="text-slate-400">Undo / Redo</span>
+          <kbd class="shortcut-badge">Ctrl+Z / Y</kbd>
+        </div>
+        <div class="flex justify-between p-2 rounded bg-slate-900/60 border border-white/5">
+          <span class="text-slate-400">Fit Zoom to Screen</span>
+          <kbd class="shortcut-badge">F</kbd>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Core Studio Scripts -->
+  <script src="app.js"></script>
+</body>
+
+</html>
