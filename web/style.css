@@ -329,6 +329,52 @@ html.light .viewport-grid, html[data-theme="light"] .viewport-grid {
   border-radius: 2px;
 }
 
+/* Before / After Comparison Split Slider */
+.split-divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #ffffff;
+  box-shadow: 0 0 12px rgba(0, 0, 0, 0.8), 0 0 6px rgba(59, 130, 246, 0.9);
+  z-index: 35;
+  transform: translateX(-50%);
+  cursor: ew-resize;
+  pointer-events: auto;
+}
+
+.split-handle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #0f172a;
+  border: 2px solid #ffffff;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6), 0 0 14px rgba(59, 130, 246, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  cursor: ew-resize;
+  user-select: none;
+  transition: transform 0.15s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.15s ease, background-color 0.15s ease;
+}
+
+.split-handle:hover {
+  transform: translate(-50%, -50%) scale(1.14);
+  background: #1e293b;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.8), 0 0 20px rgba(59, 130, 246, 0.85);
+  border-color: #60a5fa;
+}
+
+.split-handle:active {
+  transform: translate(-50%, -50%) scale(0.96);
+}
+
+
 /* Studio Select / Input */
 .studio-input {
   background-color: var(--bg-input);
@@ -386,3 +432,47 @@ html.light .viewport-grid, html[data-theme="light"] .viewport-grid {
   box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6);
   color: var(--text-primary);
 }
+
+/* Engine Mode Buttons */
+.engine-mode-btn {
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.engine-mode-btn:hover:not(.active) {
+  background-color: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
+}
+
+/* Cloud AI Dermatology Inspector Drawer */
+#cloud-inspector-drawer {
+  animation: drawerIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes drawerIn {
+  from {
+    opacity: 0;
+    transform: translateX(18px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+/* Circular Clarity Gauge Pulse */
+#cloud-clarity-circle {
+  box-shadow: 0 0 18px rgba(99, 102, 241, 0.35);
+  animation: clarityPulse 3s ease-in-out infinite;
+}
+
+@keyframes clarityPulse {
+  0%, 100% {
+    box-shadow: 0 0 12px rgba(99, 102, 241, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 24px rgba(99, 102, 241, 0.6);
+  }
+}
+

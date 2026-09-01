@@ -20,7 +20,7 @@ from PIL import Image, ImageFilter
 import torch
 
 from blemish_detector import auto_detect_blemishes
-from gemini_detector import detect_blemishes_gemini
+from gemini_detector import detect_blemishes_gemini, analyze_gemini_pure_cloud
 from face_segmenter import segment_face_skin, get_bisenet_parser
 from pimple_detector_v2 import detect_pimple_candidates, blobs_to_mask, add_blob_at_point, toggle_blob_at_point, delete_blob_at_point
 from skin_toner import calculate_tone_lift, create_lightened_rgba_patch
@@ -180,6 +180,11 @@ if WEB_DIR.exists():
     async def serve_js():
         return FileResponse(str(WEB_DIR / "app.js"))
 
+    @app.get("/favicon.ico")
+    async def serve_favicon():
+        return Response(status_code=204)
+
+
 
 @app.get("/health")
 async def health_check():
@@ -213,6 +218,51 @@ async def set_api_key(gemini_api_key: str = Form(...)):
     save_config(cfg)
     os.environ["GEMINI_API_KEY"] = key
     return {"status": "saved", "gemini_enabled": bool(key)}
+
+
+@app.get("/api/cloud/status")
+async def cloud_api_status():
+    cfg = load_config()
+    key = cfg.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
+    return {
+        "cloud_engine_ready": bool(key),
+        "api_key_configured": bool(key),
+        "model": "gemini-3.5-flash / gemini-3.5-flash-lite",
+        "description": "Pure Cloud Vision AI Engine — Ultra-lightweight, zero GPU required."
+    }
+
+
+@app.post("/api/cloud/analyze")
+async def cloud_analyze(
+    image: UploadFile = File(..., description="Portrait image for cloud AI analysis"),
+    prompt: Optional[str] = Form(None, description="Optional natural language guidance for Gemini"),
+    api_key: Optional[str] = Form(None, description="Optional override API key")
+):
+    try:
+        cfg = load_config()
+        active_key = api_key or cfg.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
+        if not active_key:
+            raise HTTPException(status_code=400, detail="Gemini API Key is required for Cloud Mode. Please set it in Studio Settings.")
+
+        img_bytes = await image.read()
+        pil_image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+
+        result = analyze_gemini_pure_cloud(
+            img_pil=pil_image,
+            api_key=active_key,
+            custom_instruction=prompt
+        )
+
+        if not result.get("success"):
+            raise HTTPException(status_code=500, detail=result.get("error", "Cloud analysis failed."))
+
+        return JSONResponse(content=result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in /api/cloud/analyze: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 def neutralize_erythema(img_rgb: np.ndarray, mask_gray: np.ndarray) -> np.ndarray:

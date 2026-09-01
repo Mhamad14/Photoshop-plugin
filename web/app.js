@@ -13,7 +13,9 @@
     serverUrl: localStorage.getItem('ai_server_url') || 'http://127.0.0.1:8765',
     apiKey: localStorage.getItem('ai_gemini_key') || DEFAULT_KEY,
     theme: localStorage.getItem('ai_studio_theme') || 'dark',
-    activeRibbonTab: 'home',
+    engineMode: localStorage.getItem('ai_engine_mode') || 'cloud', // 'cloud' | 'hardware'
+    activeRibbonTab: 'cloud',
+    cloudDermatologyData: null,
 
     originalImage: null,       // HTMLImageElement
     originalFile: null,        // File
@@ -92,9 +94,14 @@
 
   // --- DOM ELEMENTS ---
   const elements = {
+    // Engine Mode Switcher
+    engineBtnHardware: document.getElementById('engine-btn-hardware'),
+    engineBtnCloud: document.getElementById('engine-btn-cloud'),
+
     // Ribbon Tabs & Panels
     ribbonTabs: document.querySelectorAll('.ribbon-tab'),
     ribbonPanels: {
+      cloud: document.getElementById('ribbon-panel-cloud'),
       home: document.getElementById('ribbon-panel-home'),
       blemish: document.getElementById('ribbon-panel-blemish'),
       skin: document.getElementById('ribbon-panel-skin'),
@@ -102,10 +109,33 @@
       view: document.getElementById('ribbon-panel-view')
     },
 
+    // Cloud Ribbon Controls & Inspector Drawer
+    btnCloudScan: document.getElementById('btn-cloud-scan'),
+    btnCloudHealAll: document.getElementById('btn-cloud-heal-all'),
+    btnDrawerFixAll: document.getElementById('btn-drawer-fix-all'),
+    inputCloudPrompt: document.getElementById('input-cloud-prompt'),
+    btnCloudPromptRun: document.getElementById('btn-cloud-prompt-run'),
+    selectCloudFilter: document.getElementById('select-cloud-filter'),
+    btnToggleCloudInspector: document.getElementById('btn-toggle-cloud-inspector'),
+    cloudClarityBadge: document.getElementById('cloud-clarity-badge'),
+    cloudInspectorDrawer: document.getElementById('cloud-inspector-drawer'),
+    btnCloseCloudInspector: document.getElementById('btn-close-cloud-inspector'),
+    cloudSkinTypeBadge: document.getElementById('cloud-skin-type-badge'),
+    cloudClarityVal: document.getElementById('cloud-clarity-val'),
+    cloudSummaryText: document.getElementById('cloud-summary-text'),
+    cloudZonesGrid: document.getElementById('cloud-zones-grid'),
+    cloudTargetsList: document.getElementById('cloud-targets-list'),
+    cloudTargetsCount: document.getElementById('cloud-targets-count'),
+    zoneForehead: document.getElementById('zone-forehead'),
+    zoneCheeks: document.getElementById('zone-cheeks'),
+    zoneChin: document.getElementById('zone-chin'),
+    zoneNose: document.getElementById('zone-nose'),
+
     // Dropzone & Viewport Stage
     uploadDropzone: document.getElementById('upload-dropzone'),
     fileInput: document.getElementById('file-input'),
     btnBrowseFile: document.getElementById('btn-browse-file'),
+    btnBrowseFileCloud: document.getElementById('btn-browse-file-cloud'),
     btnBrowseFileCenter: document.getElementById('btn-browse-file-center'),
     canvasContainer: document.getElementById('canvas-container'),
     viewportStage: document.getElementById('viewport-stage'),
@@ -401,10 +431,17 @@
   // --- DROPZONE & IMAGE LOADING ---
   function setupDropzone() {
     const dropzone = elements.uploadDropzone;
+    if (!dropzone || !elements.fileInput) return;
 
     dropzone.addEventListener('click', () => elements.fileInput.click());
     if (elements.btnBrowseFile) {
       elements.btnBrowseFile.addEventListener('click', (e) => {
+        e.stopPropagation();
+        elements.fileInput.click();
+      });
+    }
+    if (elements.btnBrowseFileCloud) {
+      elements.btnBrowseFileCloud.addEventListener('click', (e) => {
         e.stopPropagation();
         elements.fileInput.click();
       });
@@ -437,6 +474,7 @@
     });
 
     dropzone.addEventListener('drop', (e) => {
+      e.preventDefault();
       if (e.dataTransfer.files && e.dataTransfer.files[0]) {
         loadImageFile(e.dataTransfer.files[0]);
       }
@@ -469,21 +507,23 @@
         deselectSpot();
 
         // Show canvas stage
-        elements.uploadDropzone.classList.add('hidden');
-        elements.canvasContainer.classList.remove('hidden');
-        elements.btnAnalyze.disabled = false;
+        if (elements.uploadDropzone) elements.uploadDropzone.classList.add('hidden');
+        if (elements.canvasContainer) elements.canvasContainer.classList.remove('hidden');
+        if (elements.btnAnalyze) elements.btnAnalyze.disabled = false;
         if (elements.btnAnalyzeBlemish) elements.btnAnalyzeBlemish.disabled = false;
-        elements.btnExportMain.disabled = false;
+        if (elements.btnCloudScan) elements.btnCloudScan.disabled = false;
+        if (elements.btnCloudPromptRun) elements.btnCloudPromptRun.disabled = false;
+        if (elements.btnExportMain) elements.btnExportMain.disabled = false;
 
-        elements.labelImageDim.textContent = `${img.naturalWidth} × ${img.naturalHeight} px`;
+        if (elements.labelImageDim) elements.labelImageDim.textContent = `${img.naturalWidth} × ${img.naturalHeight} px`;
         updateSpotsCountLabel();
-        elements.labelSkinToneContainer.style.display = 'none';
+        if (elements.labelSkinToneContainer) elements.labelSkinToneContainer.style.display = 'none';
 
         resizeCanvases();
         fitZoomToScreen();
         renderCanvases();
 
-        showToast('Photo loaded. Open "Blemishes & Healing" and click "Detect Blemishes" to scan.', 'info', 4000);
+        showToast('Photo loaded. Click "Gemini Vision AI Scan" or switch to "Local Hardware Engine" to start.', 'info', 4000);
       };
       img.src = e.target.result;
     };
@@ -619,54 +659,123 @@
     if (state.showSpots && state.blobs && state.blobs.length > 0) {
       state.blobs.forEach((blob, idx) => {
         const [cx, cy] = blob.centroid;
-        const radius = Math.max(3, Math.min(22, blob.radius || 6));
+        const radius = Math.max(3, Math.min(26, blob.radius || 6));
         const isActive = blob.active !== false;
         const isHovered = (idx === state.hoveredBlobIndex);
         const isSelected = (idx === state.selectedBlobIndex);
+        const isCloudTarget = (blob.source === 'gemini_cloud_api' || state.engineMode === 'cloud' || Boolean(blob.severity));
+
+        // Color coding by type
+        let baseColor = '#ef4444'; // Red for inflamed pimple
+        let glowColor = 'rgba(239, 68, 68, 0.4)';
+        if (blob.label === 'pustule' || blob.label === 'whitehead') {
+          baseColor = '#f59e0b';
+          glowColor = 'rgba(245, 158, 11, 0.4)';
+        } else if (blob.label === 'dark_spot') {
+          baseColor = '#a855f7';
+          glowColor = 'rgba(168, 85, 247, 0.4)';
+        } else if (blob.label === 'acne_scar') {
+          baseColor = '#06b6d4';
+          glowColor = 'rgba(6, 182, 212, 0.4)';
+        }
 
         ctx.save();
-        ctx.beginPath();
-        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
 
-        if (isSelected) {
-          ctx.strokeStyle = '#38bdf8';
-          ctx.lineWidth = 3.5;
-          ctx.fillStyle = 'rgba(56, 189, 248, 0.40)';
-        } else if (isActive) {
-          if (isHovered && state.spotToolMode === 'erase') {
-            ctx.strokeStyle = '#f43f5e';
-            ctx.lineWidth = 3.2;
-            ctx.fillStyle = 'rgba(244, 63, 94, 0.50)';
-          } else {
-            ctx.strokeStyle = isHovered ? '#ffffff' : '#ef4444';
-            ctx.lineWidth = isHovered ? 2.8 : 1.8;
-            ctx.fillStyle = isHovered ? 'rgba(239, 68, 68, 0.45)' : 'rgba(239, 68, 68, 0.20)';
-          }
-        } else {
-          ctx.setLineDash([3, 3]);
-          ctx.strokeStyle = isHovered ? '#ffffff' : 'rgba(148, 163, 184, 0.8)';
-          ctx.lineWidth = isHovered ? 2.2 : 1.4;
-          ctx.fillStyle = 'rgba(148, 163, 184, 0.12)';
-        }
+        if (isCloudTarget) {
+          // Futuristic Cloud AI Box / Target Marker
+          const boxW = radius * 2.2;
+          const boxH = radius * 2.2;
+          const x1 = cx - boxW / 2;
+          const y1 = cy - boxH / 2;
 
-        ctx.fill();
-        ctx.stroke();
-
-        // Selected Ring
-        if (isSelected) {
           ctx.beginPath();
-          ctx.arc(cx, cy, radius + 3, 0, Math.PI * 2);
-          ctx.setLineDash([2, 2]);
-          ctx.strokeStyle = '#38bdf8';
-          ctx.lineWidth = 1.6;
+          ctx.roundRect(x1, y1, boxW, boxH, 4);
+          ctx.strokeStyle = isSelected ? '#38bdf8' : (isHovered ? '#ffffff' : baseColor);
+          ctx.lineWidth = isSelected ? 3.0 : (isHovered ? 2.5 : 1.8);
+          ctx.fillStyle = isSelected ? 'rgba(56, 189, 248, 0.30)' : (isHovered ? glowColor : 'rgba(0, 0, 0, 0.15)');
+          ctx.fill();
           ctx.stroke();
-        }
 
-        // Center dot
-        ctx.beginPath();
-        ctx.arc(cx, cy, isSelected ? 2.2 : 1.5, 0, Math.PI * 2);
-        ctx.fillStyle = isSelected ? '#38bdf8' : (isActive ? '#ef4444' : '#94a3b8');
-        ctx.fill();
+          // Corner brackets
+          const clen = Math.max(3, radius * 0.4);
+          ctx.strokeStyle = isSelected ? '#38bdf8' : (isHovered ? '#ffffff' : baseColor);
+          ctx.lineWidth = 2.4;
+          // Top Left
+          ctx.beginPath(); ctx.moveTo(x1, y1 + clen); ctx.lineTo(x1, y1); ctx.lineTo(x1 + clen, y1); ctx.stroke();
+          // Top Right
+          ctx.beginPath(); ctx.moveTo(x1 + boxW - clen, y1); ctx.lineTo(x1 + boxW, y1); ctx.lineTo(x1 + boxW, y1 + clen); ctx.stroke();
+          // Bottom Left
+          ctx.beginPath(); ctx.moveTo(x1, y1 + boxH - clen); ctx.lineTo(x1, y1 + boxH); ctx.lineTo(x1 + clen, y1 + boxH); ctx.stroke();
+          // Bottom Right
+          ctx.beginPath(); ctx.moveTo(x1 + boxW - clen, y1 + boxH); ctx.lineTo(x1 + boxW, y1 + boxH); ctx.lineTo(x1 + boxW, y1 + boxH - clen); ctx.stroke();
+
+          // Label Tag above box if selected or hovered or zoomed in
+          if (isSelected || isHovered || state.zoom >= 1.5) {
+            const labelText = `#${blob.id || idx + 1} ${(blob.label || 'pimple').replace(/_/g, ' ')}`;
+            ctx.font = 'bold 10px monospace';
+            const tm = ctx.measureText(labelText);
+            const tagW = tm.width + 8;
+            const tagH = 14;
+            const tagX = x1;
+            const tagY = y1 - tagH - 2;
+
+            ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+            ctx.beginPath();
+            ctx.roundRect(tagX, tagY, tagW, tagH, 3);
+            ctx.fill();
+            ctx.strokeStyle = baseColor;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            ctx.fillStyle = '#ffffff';
+            ctx.fillText(labelText, tagX + 4, tagY + 10);
+          }
+
+        } else {
+          // Standard Circular Retouch Target
+          ctx.beginPath();
+          ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+
+          if (isSelected) {
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 3.5;
+            ctx.fillStyle = 'rgba(56, 189, 248, 0.40)';
+          } else if (isActive) {
+            if (isHovered && state.spotToolMode === 'erase') {
+              ctx.strokeStyle = '#f43f5e';
+              ctx.lineWidth = 3.2;
+              ctx.fillStyle = 'rgba(244, 63, 94, 0.50)';
+            } else {
+              ctx.strokeStyle = isHovered ? '#ffffff' : '#ef4444';
+              ctx.lineWidth = isHovered ? 2.8 : 1.8;
+              ctx.fillStyle = isHovered ? 'rgba(239, 68, 68, 0.45)' : 'rgba(239, 68, 68, 0.20)';
+            }
+          } else {
+            ctx.setLineDash([3, 3]);
+            ctx.strokeStyle = isHovered ? '#ffffff' : 'rgba(148, 163, 184, 0.8)';
+            ctx.lineWidth = isHovered ? 2.2 : 1.4;
+            ctx.fillStyle = 'rgba(148, 163, 184, 0.12)';
+          }
+
+          ctx.fill();
+          ctx.stroke();
+
+          // Selected Ring
+          if (isSelected) {
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius + 3, 0, Math.PI * 2);
+            ctx.setLineDash([2, 2]);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.6;
+            ctx.stroke();
+          }
+
+          // Center dot
+          ctx.beginPath();
+          ctx.arc(cx, cy, isSelected ? 2.2 : 1.5, 0, Math.PI * 2);
+          ctx.fillStyle = isSelected ? '#38bdf8' : (isActive ? '#ef4444' : '#94a3b8');
+          ctx.fill();
+        }
 
         // Hover Erase X
         if (isHovered && state.spotToolMode === 'erase') {
@@ -1348,6 +1457,230 @@
     }
   }
 
+  // --- ENGINE MODE SWITCHER (CLOUD PURE-API VS HARDWARE LOCAL) ---
+  function switchEngineMode(mode) {
+    state.engineMode = mode;
+    localStorage.setItem('ai_engine_mode', mode);
+
+    if (elements.engineBtnHardware) {
+      elements.engineBtnHardware.classList.toggle('active', mode === 'hardware');
+      elements.engineBtnHardware.className = mode === 'hardware'
+        ? 'engine-mode-btn active px-2.5 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1.5 bg-blue-600 text-white shadow-sm transition'
+        : 'engine-mode-btn px-2.5 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1.5 text-slate-400 hover:text-white transition';
+    }
+
+    if (elements.engineBtnCloud) {
+      elements.engineBtnCloud.classList.toggle('active', mode === 'cloud');
+      elements.engineBtnCloud.className = mode === 'cloud'
+        ? 'engine-mode-btn active px-2.5 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1.5 bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-sm transition'
+        : 'engine-mode-btn px-2.5 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1.5 text-slate-400 hover:text-white transition';
+    }
+
+    if (mode === 'cloud') {
+      switchRibbonTab('cloud');
+      if (elements.cloudInspectorDrawer && state.cloudDermatologyData) {
+        elements.cloudInspectorDrawer.classList.remove('hidden');
+      }
+      showToast('Switched to Pure Gemini AI Cloud Mode (0% GPU, Cloud VLM)', 'info', 3000);
+    } else {
+      switchRibbonTab('home');
+      showToast('Switched to Local Hardware Engine (Simple-LaMa + BiSeNet)', 'info', 3000);
+    }
+
+    renderOverlayCanvas();
+  }
+
+  // --- CLOUD AI SCAN (PURE GEMINI API) ---
+  async function runCloudAiScan(customPrompt = '') {
+    if (!state.originalFile) {
+      showToast('Please upload a portrait first.', 'warning');
+      return;
+    }
+
+    const promptText = (customPrompt || (elements.inputCloudPrompt ? elements.inputCloudPrompt.value : '')).trim();
+
+    showProcessingBadge('Gemini 3.5 Flash Vision AI is scanning facial blemishes...');
+    if (elements.btnCloudScan) elements.btnCloudScan.disabled = true;
+    if (elements.btnCloudPromptRun) elements.btnCloudPromptRun.disabled = true;
+
+    const startTime = performance.now();
+    const formData = new FormData();
+    formData.append('image', state.originalFile);
+    if (promptText) formData.append('prompt', promptText);
+    if (state.apiKey) formData.append('api_key', state.apiKey);
+
+    try {
+      const res = await fetch(`${state.serverUrl}/api/cloud/analyze`, {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.detail || `Cloud scan failed (${res.status})`);
+      }
+
+      const data = await res.json();
+      state.cloudDermatologyData = data;
+      state.blobs = data.blobs || [];
+
+      deselectSpot();
+      pushSpotHistory();
+      updateSpotsCountLabel();
+
+      // Render Dermatology Inspector Drawer
+      renderCloudInspector(data);
+
+      const elapsed = Math.round(performance.now() - startTime);
+      if (elements.labelRenderTime) {
+        elements.labelRenderTime.textContent = `Cloud Latency: ${elapsed}ms`;
+      }
+
+      renderOverlayCanvas();
+      showToast(`Gemini AI identified ${state.blobs.length} precision targets with ${data.clarity_score || 85}% skin clarity.`, 'success', 4000);
+
+    } catch (err) {
+      console.error('Cloud scan error:', err);
+      showCustomAlert('Gemini Cloud AI Error', `Cloud analysis failed: ${err.message}`, 'error');
+    } finally {
+      hideProcessingBadge();
+      if (elements.btnCloudScan) elements.btnCloudScan.disabled = false;
+      if (elements.btnCloudPromptRun) elements.btnCloudPromptRun.disabled = false;
+      if (elements.btnCloudHealAll) elements.btnCloudHealAll.disabled = false;
+      if (elements.btnDrawerFixAll) elements.btnDrawerFixAll.disabled = false;
+    }
+  }
+
+  // --- 1-CLICK AI BLEMISH HEALING & FACE CLEAN ---
+  async function applyAiFixAndCleanFace() {
+    if (!state.originalFile) {
+      showToast('Please upload a portrait first.', 'warning');
+      return;
+    }
+
+    // If no blobs scanned yet, run scan first
+    if (!state.blobs || state.blobs.length === 0) {
+      showToast('Scanning portrait for blemishes first...', 'info', 2000);
+      if (state.engineMode === 'cloud') {
+        await runCloudAiScan();
+      } else {
+        await triggerAutoAnalyze();
+      }
+      if (!state.blobs || state.blobs.length === 0) {
+        showToast('No active blemishes found to heal!', 'info', 3000);
+        return;
+      }
+    }
+
+    showProcessingBadge('✨ AI Inpainting Pimples & Polishing Complexion...');
+    if (elements.btnCloudHealAll) elements.btnCloudHealAll.disabled = true;
+    if (elements.btnDrawerFixAll) elements.btnDrawerFixAll.disabled = true;
+
+    // Enable high quality healing and skin smoothing parameters
+    state.params.includeHeal = true;
+    state.params.includeSmooth = true;
+    if (state.params.smoothStrength < 0.25) state.params.smoothStrength = 0.35;
+    if (elements.chkSmooth) elements.chkSmooth.checked = true;
+
+    try {
+      await triggerLivePreview();
+      setViewMode('split');
+      showToast(`✨ Healed ${state.blobs.length} blemishes & cleansed skin! Drag the slider to compare Before & After.`, 'success', 5000);
+    } catch (err) {
+      console.error('Face clean error:', err);
+      showCustomAlert('Healing Error', `Failed to apply face clean: ${err.message}`, 'error');
+    } finally {
+      hideProcessingBadge();
+      if (elements.btnCloudHealAll) elements.btnCloudHealAll.disabled = false;
+      if (elements.btnDrawerFixAll) elements.btnDrawerFixAll.disabled = false;
+    }
+  }
+
+  // --- RENDER CLOUD DERMATOLOGY INSPECTOR ---
+  function renderCloudInspector(data) {
+    if (!elements.cloudInspectorDrawer) return;
+
+    elements.cloudInspectorDrawer.classList.remove('hidden');
+
+    const score = data.clarity_score || 85;
+    if (elements.cloudClarityVal) elements.cloudClarityVal.textContent = `${score}%`;
+    if (elements.cloudClarityBadge) elements.cloudClarityBadge.textContent = `Score: ${score}%`;
+    if (elements.cloudSkinTypeBadge) elements.cloudSkinTypeBadge.textContent = data.skin_type || 'Combination / Acne-Prone';
+    if (elements.cloudSummaryText) elements.cloudSummaryText.textContent = data.summary || 'Dermatological assessment completed.';
+
+    // Enable fix buttons
+    if (elements.btnCloudHealAll) elements.btnCloudHealAll.disabled = false;
+    if (elements.btnDrawerFixAll) elements.btnDrawerFixAll.disabled = false;
+
+    // Zones
+    const zones = data.zone_analysis || {};
+    if (elements.zoneForehead) elements.zoneForehead.textContent = zones.forehead || 'Normal';
+    if (elements.zoneCheeks) elements.zoneCheeks.textContent = zones.cheeks || 'Normal';
+    if (elements.zoneChin) elements.zoneChin.textContent = zones.chin_jaw || zones.chin || 'Normal';
+    if (elements.zoneNose) elements.zoneNose.textContent = zones.nose || 'Normal';
+
+    // Target List
+    if (elements.cloudTargetsList) {
+      elements.cloudTargetsList.innerHTML = '';
+      const blobs = data.blobs || [];
+      if (elements.cloudTargetsCount) elements.cloudTargetsCount.textContent = blobs.length;
+
+      if (blobs.length === 0) {
+        elements.cloudTargetsList.innerHTML = '<div class="text-[11px] text-emerald-400 text-center py-4 font-medium">✨ Skin is clean. No active blemishes detected.</div>';
+        return;
+      }
+
+      blobs.forEach((b, idx) => {
+        const item = document.createElement('div');
+        item.className = 'p-2 rounded-lg bg-slate-900/90 hover:bg-indigo-950/60 border border-white/5 hover:border-indigo-500/40 cursor-pointer flex items-center justify-between transition text-xs';
+        
+        const labelName = (b.label || 'inflamed_pimple').replace(/_/g, ' ');
+        const isSelected = (idx === state.selectedBlobIndex);
+        if (isSelected) item.classList.add('border-indigo-400', 'bg-indigo-950/80');
+
+        let tagColor = 'bg-rose-500/20 text-rose-300 border-rose-500/30';
+        if (b.label === 'pustule' || b.label === 'whitehead') tagColor = 'bg-amber-500/20 text-amber-300 border-amber-500/30';
+        if (b.label === 'dark_spot') tagColor = 'bg-purple-500/20 text-purple-300 border-purple-500/30';
+        if (b.label === 'acne_scar') tagColor = 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30';
+
+        item.innerHTML = `
+          <div class="flex items-center gap-2">
+            <span class="w-5 h-5 rounded-full bg-slate-800 text-[10px] font-mono flex items-center justify-center text-slate-300 font-semibold">#${b.id || idx + 1}</span>
+            <div>
+              <div class="font-semibold text-slate-200 capitalize leading-tight">${labelName}</div>
+              <div class="text-[9px] text-slate-400 font-mono">${Math.round(b.centroid[0])}, ${Math.round(b.centroid[1])} px</div>
+            </div>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="px-1.5 py-0.5 rounded text-[9px] font-semibold border ${tagColor} capitalize">${b.severity || 'target'}</span>
+          </div>
+        `;
+
+        item.addEventListener('click', () => {
+          selectSpot(idx);
+          focusOnTarget(b.centroid[0], b.centroid[1]);
+        });
+
+        elements.cloudTargetsList.appendChild(item);
+      });
+    }
+
+    if (window.lucide) window.lucide.createIcons();
+  }
+
+  function focusOnTarget(imgX, imgY) {
+    if (!state.originalImage) return;
+    const stageW = elements.viewportStage.clientWidth;
+    const stageH = elements.viewportStage.clientHeight;
+
+    state.zoom = Math.max(state.zoom, 1.8);
+    state.panX = stageW / 2 - imgX * state.zoom;
+    state.panY = stageH / 2 - imgY * state.zoom;
+
+    updateCanvasTransforms();
+    renderOverlayCanvas();
+  }
+
   // --- API CALL: LIVE RESULT PREVIEW ---
   function scheduleLivePreview(delayMs = 180) {
     if (state.previewDebounceTimer) clearTimeout(state.previewDebounceTimer);
@@ -1491,7 +1824,7 @@
     });
 
     // Theme toggle
-    elements.btnThemeToggle.addEventListener('click', toggleTheme);
+    if (elements.btnThemeToggle) elements.btnThemeToggle.addEventListener('click', toggleTheme);
 
     // Toolbar Spot Sub-Mode Selectors
     if (elements.btnModeToggle) elements.btnModeToggle.addEventListener('click', () => setSpotToolMode('toggle'));
@@ -1665,44 +1998,110 @@
       }
     });
 
+    // Engine Mode Switcher
+    if (elements.engineBtnHardware) elements.engineBtnHardware.addEventListener('click', () => switchEngineMode('hardware'));
+    if (elements.engineBtnCloud) elements.engineBtnCloud.addEventListener('click', () => switchEngineMode('cloud'));
+
+    // Cloud AI Scan & Prompt Director
+    if (elements.btnCloudScan) elements.btnCloudScan.addEventListener('click', () => runCloudAiScan());
+    if (elements.btnCloudHealAll) elements.btnCloudHealAll.addEventListener('click', applyAiFixAndCleanFace);
+    if (elements.btnDrawerFixAll) elements.btnDrawerFixAll.addEventListener('click', applyAiFixAndCleanFace);
+    if (elements.btnCloudPromptRun) elements.btnCloudPromptRun.addEventListener('click', () => runCloudAiScan());
+    if (elements.inputCloudPrompt) {
+      elements.inputCloudPrompt.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') runCloudAiScan();
+      });
+    }
+
+    document.querySelectorAll('.cloud-prompt-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        const prompt = chip.getAttribute('data-prompt');
+        if (elements.inputCloudPrompt) elements.inputCloudPrompt.value = prompt;
+        runCloudAiScan(prompt);
+      });
+    });
+
+    if (elements.selectCloudFilter) {
+      elements.selectCloudFilter.addEventListener('change', (e) => {
+        const type = e.target.value;
+        if (!state.cloudDermatologyData) return;
+        const allBlobs = state.cloudDermatologyData.blobs || [];
+        if (type === 'all') {
+          state.blobs = allBlobs.map(b => ({ ...b, active: true }));
+        } else {
+          state.blobs = allBlobs.map(b => ({
+            ...b,
+            active: (b.label === type || (type === 'inflamed_pimple' && b.label === 'pimple'))
+          }));
+        }
+        updateSpotsCountLabel();
+        renderOverlayCanvas();
+        showToast(`Filtered by: ${type.replace(/_/g, ' ')}`, 'info', 2000);
+      });
+    }
+
+    if (elements.btnToggleCloudInspector) {
+      elements.btnToggleCloudInspector.addEventListener('click', () => {
+        if (elements.cloudInspectorDrawer) {
+          elements.cloudInspectorDrawer.classList.toggle('hidden');
+        }
+      });
+    }
+
+    if (elements.btnCloseCloudInspector) {
+      elements.btnCloseCloudInspector.addEventListener('click', () => {
+        if (elements.cloudInspectorDrawer) {
+          elements.cloudInspectorDrawer.classList.add('hidden');
+        }
+      });
+    }
+
     // Hero Analyze & Prompts
     if (elements.btnAnalyze) elements.btnAnalyze.addEventListener('click', triggerAutoAnalyze);
     if (elements.btnAnalyzeBlemish) elements.btnAnalyzeBlemish.addEventListener('click', triggerAutoAnalyze);
-    elements.btnSendPrompt.addEventListener('click', () => sendTextPrompt());
-    elements.inputPrompt.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') sendTextPrompt();
-    });
+    if (elements.btnSendPrompt) elements.btnSendPrompt.addEventListener('click', () => sendTextPrompt());
+    if (elements.inputPrompt) {
+      elements.inputPrompt.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') sendTextPrompt();
+      });
+    }
 
     document.querySelectorAll('.prompt-chip').forEach(chip => {
       chip.addEventListener('click', () => {
         const prompt = chip.getAttribute('data-prompt');
-        elements.inputPrompt.value = prompt;
+        if (elements.inputPrompt) elements.inputPrompt.value = prompt;
         sendTextPrompt(prompt);
       });
     });
 
     // Preset Selection
-    elements.selectPreset.addEventListener('change', (e) => applyPreset(e.target.value));
+    if (elements.selectPreset) {
+      elements.selectPreset.addEventListener('change', (e) => applyPreset(e.target.value));
+    }
 
     // Reset Image
-    elements.btnResetImage.addEventListener('click', () => {
-      showCustomConfirm('Reset Image', 'Do you want to clear current photo and start with a new one?', () => {
-        location.reload();
+    if (elements.btnResetImage) {
+      elements.btnResetImage.addEventListener('click', () => {
+        showCustomConfirm('Reset Image', 'Do you want to clear current photo and start with a new one?', () => {
+          location.reload();
+        });
       });
-    });
+    }
 
     // Export
-    elements.btnExportMain.addEventListener('click', exportResult);
+    if (elements.btnExportMain) {
+      elements.btnExportMain.addEventListener('click', exportResult);
+    }
 
     // Shortcuts Modal
-    elements.btnShortcuts.addEventListener('click', openShortcutsModal);
-    elements.btnCloseShortcuts.addEventListener('click', closeShortcutsModal);
+    if (elements.btnShortcuts) elements.btnShortcuts.addEventListener('click', openShortcutsModal);
+    if (elements.btnCloseShortcuts) elements.btnCloseShortcuts.addEventListener('click', closeShortcutsModal);
 
     // Settings Modal
-    elements.btnSettings.addEventListener('click', openSettingsModal);
-    elements.geminiStatusPill.addEventListener('click', openSettingsModal);
-    elements.btnCloseSettings.addEventListener('click', closeSettingsModal);
-    elements.btnSaveSettings.addEventListener('click', saveSettings);
+    if (elements.btnSettings) elements.btnSettings.addEventListener('click', openSettingsModal);
+    if (elements.geminiStatusPill) elements.geminiStatusPill.addEventListener('click', openSettingsModal);
+    if (elements.btnCloseSettings) elements.btnCloseSettings.addEventListener('click', closeSettingsModal);
+    if (elements.btnSaveSettings) elements.btnSaveSettings.addEventListener('click', saveSettings);
     if (elements.selectThemePalette) {
       elements.selectThemePalette.addEventListener('change', (e) => applyTheme(e.target.value));
     }
@@ -1878,6 +2277,17 @@
 
   function hideProcessingBadge() {
     elements.processingBadge.classList.add('hidden');
+  }
+
+  // --- INITIALIZATION ---
+  function init() {
+    setupDropzone();
+    setupEventListeners();
+    setupCanvasInteractions();
+    applyTheme(state.theme);
+    checkServerHealth();
+    switchEngineMode(state.engineMode);
+    if (window.lucide) window.lucide.createIcons();
   }
 
   // Run on DOM ready
