@@ -223,6 +223,29 @@ def enhance_eyes_and_teeth(
     }
 
 
+def apply_eye_and_teeth_enhancement(
+    img_rgb: np.ndarray,
+    class_mask: Optional[np.ndarray] = None,
+    teeth_whiten: float = 0.65,
+    eye_brighten: float = 0.45,
+    iris_sparkle: float = 0.35,
+    feather_radius: int = 3,
+    **kwargs: Any
+) -> np.ndarray:
+    teeth_strength = kwargs.get("teeth_whiten_strength", teeth_whiten)
+    eye_strength = kwargs.get("eye_brighten_strength", eye_brighten)
+    sparkle_strength = kwargs.get("iris_sparkle_strength", iris_sparkle)
+    final_rgb, _, _ = enhance_eyes_and_teeth(
+        img_rgb,
+        class_mask=class_mask,
+        teeth_whiten_strength=teeth_strength,
+        eye_brighten_strength=eye_strength,
+        iris_sparkle_strength=sparkle_strength,
+        feather_radius=feather_radius,
+    )
+    return final_rgb
+
+
 def create_eye_teeth_rgba_patch(
     img_rgb: np.ndarray,
     teeth_whiten_strength: float = 0.65,

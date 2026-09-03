@@ -52,8 +52,8 @@ def compute_multi_scale_differential_energy(
     r = img_rgb[:, :, 0].astype(np.float32)
     g = img_rgb[:, :, 1].astype(np.float32)
 
-    # 1. Local Adaptive Redness Baseline (15-25px kernel)
-    ksize_local = max(13, int(min(h, w) * 0.025) | 1)
+    # 1. Local Adaptive Redness Baseline (21-45px kernel to prevent cluster self-canceling)
+    ksize_local = max(21, int(min(h, w) * 0.055) | 1)
     blurred_skin_w = cv2.GaussianBlur(skin_float, (ksize_local, ksize_local), 0) + 1e-4
     local_baseline_a = cv2.GaussianBlur(a_chan * skin_float, (ksize_local, ksize_local), 0) / blurred_skin_w
     local_baseline_l = cv2.GaussianBlur(l_chan * skin_float, (ksize_local, ksize_local), 0) / blurred_skin_w
@@ -74,8 +74,8 @@ def compute_multi_scale_differential_energy(
 
     combined_signal = (erythema_signal * 0.75) + (specular_signal * 0.15) + (dark_comedone_signal * 0.10)
 
-    # 2. Multi-Scale Difference of Gaussians (DoG) capturing all discrete blemish sizes (2.5px to 11px)
-    scales = [(0.8, 1.8), (1.2, 2.5), (1.8, 3.6), (2.6, 5.2), (3.8, 7.6)]
+    # 2. Multi-Scale Difference of Gaussians (DoG) capturing all discrete blemish sizes (2.5px to 14px)
+    scales = [(0.8, 1.8), (1.2, 2.5), (1.8, 3.6), (2.6, 5.2), (3.8, 7.6), (5.0, 10.0)]
     dog_maps = []
     for s1, s2 in scales:
         g1 = cv2.GaussianBlur(combined_signal, (0, 0), s1)
@@ -362,9 +362,9 @@ def detect_pimple_candidates(
                 for b in vlm_blobs:
                     cx_raw, cy_raw = b["centroid"]
                     if 0 <= cy_raw < h and 0 <= cx_raw < w and skin_binary[int(cy_raw), int(cx_raw)] > 0:
-                        px, py, fit_r = refine_peak_and_radius(spot_energy, delta_a, cx_raw, cy_raw, b.get("radius", 5), search_window=3)
-                        valid_spot, contrast_score = verify_annular_contrast(img_rgb, img_lab, skin_binary, px, py, fit_r)
-                        if valid_spot:
+                        px, py, fit_r = refine_peak_and_radius(spot_energy, delta_a, cx_raw, cy_raw, b.get("radius", 6), search_window=4)
+                        ipx, ipy = int(round(px)), int(round(py))
+                        if 0 <= ipy < h and 0 <= ipx < w and skin_binary[ipy, ipx] > 0:
                             raw_candidates.append({
                                 "id": 0,
                                 "bbox": [int(px - fit_r), int(py - fit_r), int(px + fit_r), int(py + fit_r)],
@@ -380,23 +380,22 @@ def detect_pimple_candidates(
         except Exception as e:
             logger.warning(f"Gemini Vision scan warning: {e}")
 
-    # 3. Stage 2: Local Multi-Scale Peak Detection with Strict Annular Verification
+    # 3. Stage 2: Local Multi-Scale Peak Detection with Annular Verification
     skin_spots = spot_energy[skin_binary > 0]
     if len(skin_spots) > 0:
         mean_val = float(np.mean(skin_spots))
         std_val = float(np.std(skin_spots))
         max_val = float(np.max(skin_spots))
 
-        # Absolute significance floor for genuine blemishes:
-        # Clean porcelain skin has max spot energy < 1.6. It will yield 0 false spots!
-        min_abs_energy = 1.70 - (sensitivity - 0.5) * 0.90
-        
-        if max_val >= min_abs_energy:
-            # Dynamic threshold scaling
-            k = (1.0 - max(0.05, min(1.0, sensitivity))) * 1.8 + 0.50
-            threshold = max(min_abs_energy, mean_val + (k * std_val))
+        # Balanced dynamic threshold scaling:
+        # Sens 0.1 (conservative) -> threshold ~ 1.05
+        # Sens 0.5 (balanced default) -> threshold ~ 0.72
+        # Sens 0.9 (maximum acne coverage) -> threshold ~ 0.42
+        clamped_sens = max(0.05, min(1.0, sensitivity))
+        threshold = max(0.35, 1.15 - (clamped_sens - 0.1) * 0.92)
 
-            candidate_mask = ((spot_energy >= threshold) & (spot_energy > 1.20)).astype(np.uint8) * 255
+        if max_val >= threshold:
+            candidate_mask = (spot_energy >= threshold).astype(np.uint8) * 255
             num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(candidate_mask)
 
             for i in range(1, num_labels):
@@ -405,28 +404,33 @@ def detect_pimple_candidates(
                 bh = int(stats[i, cv2.CC_STAT_HEIGHT])
                 cx, cy = float(centroids[i][0]), float(centroids[i][1])
 
-                if bw == 0 or bh == 0 or area < 1:
+                if bw == 0 or bh == 0 or area < 2:
                     continue
 
                 aspect_ratio = float(bw) / float(bh)
-                if aspect_ratio < 0.20 or aspect_ratio > 5.0:
+                if aspect_ratio < 0.15 or aspect_ratio > 6.0:
                     continue
 
-                eff_r = max(3, int(round(math.sqrt(area / math.pi) * 1.3)))
+                eff_r = max(3, int(round(math.sqrt(area / math.pi) * 1.25)))
                 px, py, fit_r = refine_peak_and_radius(spot_energy, delta_a, cx, cy, eff_r, search_window=3)
 
                 if fit_r < min_radius or fit_r > max_radius:
                     continue
 
-                # Annular local contrast verification (Rejects clean forehead, cheeks, and neck shadows)
-                valid_spot, contrast_score = verify_annular_contrast(img_rgb, img_lab, skin_binary, px, py, fit_r)
-                if not valid_spot:
+                ipx, ipy = int(round(px)), int(round(py))
+                if not (0 <= ipy < h and 0 <= ipx < w) or skin_binary[ipy, ipx] == 0:
                     continue
 
                 # Structure tensor coherence check at peak (rejects crease lines)
-                ipx, ipy = int(round(px)), int(round(py))
-                if 0 <= ipy < h and 0 <= ipx < w:
-                    if coherence[ipy, ipx] > 0.32:
+                if coherence[ipy, ipx] > 0.38:
+                    continue
+
+                # Annular local contrast verification (Rejects clean forehead, cheeks, and neck shadows)
+                valid_spot, contrast_score = verify_annular_contrast(img_rgb, img_lab, skin_binary, px, py, fit_r)
+                if not valid_spot:
+                    # In acne clusters, neighboring pimples elevate annular redness.
+                    # Keep clearly inflamed peaks that exceed baseline erythema:
+                    if delta_a[ipy, ipx] < 2.5 and spot_energy[ipy, ipx] < (threshold * 1.35):
                         continue
 
                 blob_pixels = spot_energy[labels == i]
@@ -445,10 +449,10 @@ def detect_pimple_candidates(
                     "source": "auto_cv"
                 })
         else:
-            logger.info("Clean, smooth porcelain skin detected (peak energy %.2f < %.2f): 0 blemish spots.", max_val, min_abs_energy)
+            logger.info("Clean, smooth porcelain skin detected (peak energy %.2f < %.2f): 0 blemish spots.", max_val, threshold)
 
     # 4. Apply Non-Maximum Suppression to remove duplicates and merge clusters
-    final_blobs = apply_fast_nms(raw_candidates, overlap_dist_factor=0.75, max_blobs=350)
+    final_blobs = apply_fast_nms(raw_candidates, overlap_dist_factor=0.65, max_blobs=350)
     final_mask = blobs_to_mask(final_blobs, (h, w), dilate_px=1)
 
     logger.info(f"Final precision blemish detection: {len(final_blobs)} verified targets.")

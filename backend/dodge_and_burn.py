@@ -108,6 +108,19 @@ def generate_dodge_and_burn_map(
     return composited_rgb, db_gray, feathered_alpha
 
 
+def apply_ai_dodge_and_burn(
+    img_rgb: np.ndarray,
+    skin_mask: np.ndarray,
+    strength: float = 0.5,
+    softness: float = 0.6,
+    feather_radius: int = 4,
+) -> np.ndarray:
+    composited_rgb, _, _ = generate_dodge_and_burn_map(
+        img_rgb, skin_mask, strength=strength, softness=softness, feather_radius=feather_radius
+    )
+    return composited_rgb
+
+
 def create_dodge_and_burn_rgba_patch(
     img_rgb: np.ndarray,
     skin_mask: np.ndarray,

@@ -85,6 +85,19 @@ def neutralize_skin_shine(
     return composited, patch_alpha
 
 
+def apply_shine_neutralizer(
+    img_rgb: np.ndarray,
+    skin_mask: np.ndarray,
+    strength: float = 0.5,
+    threshold: float = 0.75,
+    feather_radius: int = 4,
+) -> np.ndarray:
+    composited, _ = neutralize_skin_shine(
+        img_rgb, skin_mask, strength=strength, threshold=threshold, feather_radius=feather_radius
+    )
+    return composited
+
+
 def create_shine_neutralizer_rgba_patch(
     img_rgb: np.ndarray,
     skin_mask: np.ndarray,

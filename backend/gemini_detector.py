@@ -65,7 +65,7 @@ Output JSON format:
 
         response = None
         last_err = None
-        for candidate_model in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-pro"]:
+        for candidate_model in ["gemini-3.6-flash", "gemini-3.1-pro-preview", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
             try:
                 response = client.models.generate_content(
                     model=candidate_model,

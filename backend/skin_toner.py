@@ -91,6 +91,23 @@ def calculate_tone_lift(
     return lightened_full_rgb, feathered_alpha
 
 
+def apply_relative_lighten(
+    img_rgb: np.ndarray,
+    skin_mask: np.ndarray,
+    strength: float = 0.35,
+    base_tone_lab: Optional[List[float]] = None,
+    feather_radius: int = 4,
+) -> np.ndarray:
+    lightened_rgb, _ = calculate_tone_lift(
+        img_rgb=img_rgb,
+        skin_mask=skin_mask,
+        strength=strength,
+        base_tone_lab=base_tone_lab,
+        feather_radius=feather_radius,
+    )
+    return lightened_rgb
+
+
 def create_lightened_rgba_patch(
     img_rgb: np.ndarray,
     skin_mask: np.ndarray,

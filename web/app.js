@@ -190,6 +190,8 @@
     btnAnalyzeText: document.getElementById('btn-analyze-text'),
     btnAnalyzeBlemish: document.getElementById('btn-analyze-blemish'),
     btnAnalyzeBlemishText: document.getElementById('btn-analyze-blemish-text'),
+    btnApplyHealing: document.getElementById('btn-apply-healing'),
+    btnApplyHealingHome: document.getElementById('btn-apply-healing-home'),
     sliderSensitivity: document.getElementById('slider-sensitivity'),
     valSensitivity: document.getElementById('val-sensitivity'),
     inputPrompt: document.getElementById('input-prompt'),
@@ -1664,6 +1666,27 @@
         fitZoomToScreen();
       }
     });
+
+    // Apply Healing Action
+    function handleApplyHealingClick() {
+      if (!state.originalFile) {
+        showToast('Please open an image first.', 'warning');
+        return;
+      }
+      const activeCount = state.blobs.filter(b => b.active !== false).length;
+      if (activeCount === 0) {
+        showToast('No active spots marked. Use Add (+) to click on blemishes first.', 'info', 4000);
+        return;
+      }
+      state.params.includeHeal = true;
+      showProcessingBadge(`Inpainting ${activeCount} blemishes with Simple-LaMa...`);
+      setViewMode('after');
+      scheduleLivePreview(0);
+      showToast(`Healing ${activeCount} spots with Simple-LaMa...`, 'info', 3000);
+    }
+
+    if (elements.btnApplyHealing) elements.btnApplyHealing.addEventListener('click', handleApplyHealingClick);
+    if (elements.btnApplyHealingHome) elements.btnApplyHealingHome.addEventListener('click', handleApplyHealingClick);
 
     // Hero Analyze & Prompts
     if (elements.btnAnalyze) elements.btnAnalyze.addEventListener('click', triggerAutoAnalyze);

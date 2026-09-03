@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 
 import cv2
 import numpy as np
@@ -135,6 +135,23 @@ def frequency_separation_smooth(
     composited = img_f * (1.0 - alpha_f) + preserved_smoothed * alpha_f
 
     return composited.clip(0, 255).astype(np.uint8), feathered_alpha
+
+
+def apply_frequency_separation(
+    img_rgb: np.ndarray,
+    skin_mask: np.ndarray,
+    strength: float = 0.5,
+    texture_keep: float = 0.85,
+    feather_radius: int = 4,
+) -> np.ndarray:
+    composited, _ = frequency_separation_smooth(
+        img_rgb,
+        skin_mask,
+        strength=strength,
+        texture_keep=texture_keep,
+        feather_radius=feather_radius,
+    )
+    return composited
 
 
 def apply_full_smooth(
