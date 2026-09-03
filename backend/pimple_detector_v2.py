@@ -98,9 +98,11 @@ def compute_multi_scale_differential_energy(
     lambda2 = (trace - disc) / 2.0
     coherence = (lambda1 - lambda2) / (lambda1 + lambda2 + 1e-4)
 
-    # Strong attenuation for directional creases (coherence > 0.25)
-    edge_attenuation = np.clip(1.0 - (coherence - 0.25) * 3.8, 0.0, 1.0)
-    spot_energy = spot_energy * edge_attenuation
+    # Attenuate 1D directional creases (only extreme creases coherence > 0.75; never attenuate genuine erythema)
+    is_strong_erythema = (delta_a > 1.8)
+    crease_attenuation = np.clip(1.0 - (coherence - 0.72) * 3.5, 0.0, 1.0)
+    crease_attenuation = np.where(is_strong_erythema, 1.0, crease_attenuation)
+    spot_energy = spot_energy * crease_attenuation
 
     # 4. Strict Anatomical Feature & Cavity Exclusion Zones
     # Protect Nostrils, Mouth Interior, Lips, and Clean Nose from false spot detection
@@ -168,10 +170,9 @@ def verify_annular_contrast(
     l_chan = patch_lab[:, :, 0]
     a_chan = patch_lab[:, :, 1]
 
-    # STRICT NOSTRIL & LIP REJECTION
-    if np.any(l_chan[core_mask] < 58.0) or np.any(l_chan[annulus_mask] < 48.0):
-        return False, 0.0
-    if np.mean(a_chan[core_mask]) > 165.0 and np.mean(l_chan[core_mask]) < 135.0:
+    # STRICT NOSTRIL & CAVITY REJECTION
+    # Real skin/scabs have mean L* >= 35. Pure black cavities (nostril holes, open mouth) are < 32.
+    if np.mean(l_chan[core_mask]) < 36.0 or np.mean(l_chan[annulus_mask]) < 32.0:
         return False, 0.0
 
     patch_rgb = img_rgb[y1:y2, x1:x2].astype(np.float32)
@@ -230,9 +231,11 @@ def refine_peak_and_radius(
         peak_x, peak_y = ix, iy
 
     # 2. Radial falloff measurement along 8 compass rays
-    max_test_r = min(14, max(initial_r + 2, 7))
+    max_test_r = min(18, max(initial_r + 4, 8))
     peak_val = float(energy_map[peak_y, peak_x]) if (0 <= peak_y < h and 0 <= peak_x < w) else 1.0
-    thresh_falloff = max(0.7, peak_val * 0.40)
+    peak_delta_a = float(delta_a_map[peak_y, peak_x]) if (0 <= peak_y < h and 0 <= peak_x < w) else 2.0
+    thresh_falloff = max(0.08, peak_val * 0.20)
+    thresh_delta_a = max(0.8, peak_delta_a * 0.25)
 
     angles = [0, 45, 90, 135, 180, 225, 270, 315]
     radii = []
@@ -242,19 +245,21 @@ def refine_peak_and_radius(
         dx = math.cos(rad)
         dy = math.sin(rad)
         r_found = initial_r
-        for step in range(2, max_test_r + 1):
+        for step in range(3, max_test_r + 1):
             px = int(round(peak_x + dx * step))
             py = int(round(peak_y + dy * step))
             if px < 0 or py < 0 or px >= w or py >= h:
                 r_found = step
                 break
-            if energy_map[py, px] < thresh_falloff:
+            if energy_map[py, px] < thresh_falloff and delta_a_map[py, px] < thresh_delta_a:
                 r_found = step
                 break
         radii.append(r_found)
 
-    fitted_radius = int(np.percentile(radii, 60))
-    fitted_radius = max(3, min(12, fitted_radius))
+    fitted_radius = int(np.percentile(radii, 70))
+    fitted_radius = max(initial_r, fitted_radius)
+    # Add +2px margin to ensure full coverage of the surrounding red inflammatory halo
+    fitted_radius = max(5, min(18, fitted_radius + 2))
 
     return float(peak_x), float(peak_y), fitted_radius
 
@@ -421,8 +426,8 @@ def detect_pimple_candidates(
                 if not (0 <= ipy < h and 0 <= ipx < w) or skin_binary[ipy, ipx] == 0:
                     continue
 
-                # Structure tensor coherence check at peak (rejects crease lines)
-                if coherence[ipy, ipx] > 0.38:
+                # Structure tensor coherence check at peak (only true creases with low erythema)
+                if coherence[ipy, ipx] > 0.82 and delta_a[ipy, ipx] < 1.8:
                     continue
 
                 # Annular local contrast verification (Rejects clean forehead, cheeks, and neck shadows)

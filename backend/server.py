@@ -346,29 +346,32 @@ async def analyze_portrait(
     cfg = load_config()
     api_key = (gemini_api_key or "").strip() or cfg.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
 
-    # 1. Layer 1: Skin Segmentation
-    skin_mask, skin_meta = segment_face_skin(
-        img_rgb=img_rgb,
-        include_neck=include_neck,
-        feather_radius=feather_radius
-    )
+    from fastapi.concurrency import run_in_threadpool
 
-    # 2. Layer 2: Pimple Detection (within skin_mask)
-    blobs = []
-    if detect_pimples:
-        blobs, _ = detect_pimple_candidates(
+    def _do_analyze():
+        mask, meta = segment_face_skin(
             img_rgb=img_rgb,
-            skin_mask=skin_mask,
-            sensitivity=max(0.05, min(1.0, sensitivity)),
-            gemini_api_key=api_key
+            include_neck=include_neck,
+            feather_radius=feather_radius
         )
-        if preserve_moles or preserve_freckles:
-            blobs = filter_blobs_by_preference(
-                blobs=blobs,
+        b_list = []
+        if detect_pimples:
+            b_list, _ = detect_pimple_candidates(
                 img_rgb=img_rgb,
-                preserve_moles=preserve_moles,
-                preserve_freckles=preserve_freckles
+                skin_mask=mask,
+                sensitivity=max(0.05, min(1.0, sensitivity)),
+                gemini_api_key=api_key
             )
+            if preserve_moles or preserve_freckles:
+                b_list = filter_blobs_by_preference(
+                    blobs=b_list,
+                    img_rgb=img_rgb,
+                    preserve_moles=preserve_moles,
+                    preserve_freckles=preserve_freckles
+                )
+        return mask, meta, b_list
+
+    skin_mask, skin_meta, blobs = await run_in_threadpool(_do_analyze)
 
     # Generate compact optimized preview JPEG of the portrait for fast UI rendering
     prev_scale = min(1.0, 960.0 / float(max(w, h)))
@@ -1153,18 +1156,23 @@ async def apply_heal(
         # Usually a cache hit: /analyze already segmented this exact snapshot.
         sm_np, _ = get_cached_skin_mask(img_rgb, feather_radius=feather_radius)
 
+    from fastapi.concurrency import run_in_threadpool
     from spot_healer import spot_healing_brush_inpaint
-    healed_rgb, feathered_alpha = spot_healing_brush_inpaint(
-        img_rgb=img_rgb,
-        blobs=blobs,
-        lama_model=lama_model,
-        heal_mode=heal_mode,
-        texture_blend=max(0.0, min(1.0, texture_blend)),
-        dilate_px=4,
-        feather_radius=max(1, feather_radius),
-        grain_intensity=max(0.0, min(0.2, grain_intensity)),
-        skin_mask=sm_np
-    )
+
+    def _do_heal():
+        return spot_healing_brush_inpaint(
+            img_rgb=img_rgb,
+            blobs=blobs,
+            lama_model=lama_model,
+            heal_mode=heal_mode,
+            texture_blend=max(0.0, min(1.0, texture_blend)),
+            dilate_px=3,
+            feather_radius=max(1, feather_radius),
+            grain_intensity=max(0.0, min(0.2, grain_intensity)),
+            skin_mask=sm_np
+        )
+
+    healed_rgb, feathered_alpha = await run_in_threadpool(_do_heal)
 
     # 5. Build transparent RGBA PNG for non-destructive placement
     r = Image.fromarray(healed_rgb[:, :, 0])
@@ -1224,19 +1232,24 @@ async def apply_healed_base(
         return img_rgb
 
     try:
+        from fastapi.concurrency import run_in_threadpool
         from spot_healer import spot_healing_brush_inpaint
-        healed, _ = spot_healing_brush_inpaint(
-            img_rgb=img_rgb,
-            blobs=active,
-            lama_model=lama_model,
-            heal_mode=heal_mode,
-            texture_blend=max(0.0, min(1.0, texture_blend)),
-            dilate_px=4,
-            feather_radius=max(1, feather_radius),
-            grain_intensity=max(0.0, min(0.2, grain_intensity)),
-            skin_mask=skin_mask
-        )
-        return healed
+
+        def _do_healed_base():
+            healed, _ = spot_healing_brush_inpaint(
+                img_rgb=img_rgb,
+                blobs=active,
+                lama_model=lama_model,
+                heal_mode=heal_mode,
+                texture_blend=max(0.0, min(1.0, texture_blend)),
+                dilate_px=3,
+                feather_radius=max(1, feather_radius),
+                grain_intensity=max(0.0, min(0.2, grain_intensity)),
+                skin_mask=skin_mask
+            )
+            return healed
+
+        return await run_in_threadpool(_do_healed_base)
     except Exception as e:
         logger.warning(f"Upstream heal composite failed, using original: {e}")
         return img_rgb
@@ -1282,13 +1295,23 @@ async def apply_smooth(
 
     img_rgb = await apply_healed_base(img_rgb, blobs_json, heal_mode, texture_blend, grain_intensity, feather_radius, skin_mask=mask_np)
 
-    rgba_patch = create_smooth_rgba_patch(
-        img_rgb=img_rgb,
-        skin_mask=mask_np,
-        strength=max(0.0, min(1.0, strength)),
-        texture_keep=max(0.05, min(1.0, texture_keep)),
-        feather_radius=max(0, feather_radius)
-    )
+    from fastapi.concurrency import run_in_threadpool
+
+    def _do_smooth():
+        patch = create_smooth_rgba_patch(
+            img_rgb=img_rgb,
+            skin_mask=mask_np,
+            strength=max(0.0, min(1.0, strength)),
+            texture_keep=max(0.05, min(1.0, texture_keep)),
+            feather_radius=max(0, feather_radius)
+        )
+        if isinstance(patch, tuple):
+            patch = patch[0]
+        if isinstance(patch, np.ndarray):
+            patch = Image.fromarray(patch)
+        return patch
+
+    rgba_patch = await run_in_threadpool(_do_smooth)
 
     out_buf = io.BytesIO()
     rgba_patch.save(out_buf, format="PNG", optimize=True)
@@ -1310,7 +1333,13 @@ async def apply_lighten(
     skin_mask: Optional[UploadFile] = File(None, description="Optional skin mask PNG"),
     strength: float = Form(0.35, description="Lightening strength (0.0 to 1.0)"),
     base_tone_lab: Optional[str] = Form(None, description="Optional JSON [L, a, b] baseline"),
-    feather_radius: int = Form(4, description="Edge feather radius")
+    feather_radius: int = Form(4, description="Edge feather radius"),
+    blobs_json: Optional[str] = Form(None, description="Active heal blobs: composite heal first so brightened skin is blemish-free"),
+    heal_mode: str = Form("full_inpaint", description="Heal mode used for the upstream composite"),
+    texture_blend: float = Form(0.25, description="Heal texture blend (upstream composite)"),
+    grain_intensity: float = Form(0.03, description="Heal micro-grain (upstream composite)"),
+    smooth_strength: float = Form(0.0, description="Optional upstream smooth strength"),
+    texture_keep: float = Form(0.85, description="Optional upstream smooth texture retention")
 ):
     """
     Layer 5 Action 2: Lighten Skin.
@@ -1346,14 +1375,44 @@ async def apply_lighten(
     else:
         mask_np, _ = get_cached_skin_mask(img_rgb, feather_radius=feather_radius)
 
-    # Generate transparent lightened skin patch
-    rgba_patch = create_lightened_rgba_patch(
-        img_rgb=img_rgb,
-        skin_mask=mask_np,
-        strength=max(0.0, min(1.0, strength)),
-        base_tone_lab=parsed_lab,
-        feather_radius=feather_radius
+    # 1. Composite the upstream heal first so brightened pixels are 100% blemish-free
+    img_rgb = await apply_healed_base(
+        img_rgb, blobs_json, heal_mode, texture_blend, grain_intensity, feather_radius, skin_mask=mask_np
     )
+
+    # 2. If smoothing was active upstream, smooth the base before tone lifting
+    if smooth_strength > 0:
+        try:
+            from skin_smoother import apply_full_smooth
+            img_rgb, _ = apply_full_smooth(
+                img_rgb=img_rgb,
+                skin_mask=mask_np,
+                strength=smooth_strength,
+                even_redness_strength=0.35,
+                texture_keep=texture_keep,
+                feather_radius=feather_radius
+            )
+        except Exception as sm_err:
+            logger.warning(f"Tone lift upstream smooth note: {sm_err}")
+
+    # 3. Generate transparent lightened skin patch in threadpool
+    from fastapi.concurrency import run_in_threadpool
+
+    def _do_lighten():
+        patch = create_lightened_rgba_patch(
+            img_rgb=img_rgb,
+            skin_mask=mask_np,
+            strength=max(0.0, min(1.0, strength)),
+            base_tone_lab=parsed_lab,
+            feather_radius=feather_radius
+        )
+        if isinstance(patch, tuple):
+            patch = patch[0]
+        if isinstance(patch, np.ndarray):
+            patch = Image.fromarray(patch)
+        return patch
+
+    rgba_patch = await run_in_threadpool(_do_lighten)
 
     out_buf = io.BytesIO()
     rgba_patch.save(out_buf, format="PNG", optimize=True)

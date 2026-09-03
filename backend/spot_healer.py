@@ -140,34 +140,18 @@ def spot_healing_brush_inpaint(
         mask_f = (fused_mask.astype(np.float32) / 255.0)[:, :, None]
         base_healed = np.clip(clean_f + high_freq * (1.0 - mask_f * 0.6), 0, 255).astype(np.uint8)
     else:
-        # Full inpainting with frequency separation (Photoshop-level pore preservation)
-        # Separate HF (pores/texture) from LF (skin tone) BEFORE healing, heal only the
-        # LF base, then reconstruct with original HF. This prevents over-smoothing and
-        # preserves natural skin texture — the #1 tell of AI healing vs manual retouching.
+        # Full inpainting with Simple-LaMa (Direct neural skin reconstruction)
         lama_used = False
         if lama_model is not None:
             try:
                 from inpainter import inpaint_with_context_tiling
-                
-                # Extract low-frequency base (skin tone/structure only)
-                lf_base = cv2.GaussianBlur(color_neutral_rgb.astype(np.float32), (15, 15), 0)
-                hf_detail = color_neutral_rgb.astype(np.float32) - lf_base
-                
-                # Heal ONLY the low-frequency base (LaMa reconstructs tone/structure, ignores pores)
-                lf_healed = inpaint_with_context_tiling(
+                base_healed = inpaint_with_context_tiling(
                     model=lama_model,
-                    img_rgb=np.clip(lf_base, 0, 255).astype(np.uint8),
+                    img_rgb=color_neutral_rgb,
                     mask_gray=fused_mask,
                     max_tile_size=768,
-                    context_pad=50
+                    context_pad=60
                 )
-                
-                # Reconstruct: healed base + ORIGINAL high-frequency detail (pores preserved)
-                # Inside mask core: fade original HF by 70% (remove blemish texture bumps)
-                # Outside mask: keep 100% original HF (seamless transition)
-                mask_fade = cv2.GaussianBlur(fused_mask.astype(np.float32) / 255.0, (9, 9), 0)[:, :, None]
-                hf_blend = hf_detail * (1.0 - mask_fade * 0.7)
-                base_healed = np.clip(lf_healed.astype(np.float32) + hf_blend, 0, 255).astype(np.uint8)
                 lama_used = True
             except Exception as e:
                 logger.warning(f"LaMa neural inpaint failed, using Telea: {e}")
@@ -175,33 +159,6 @@ def spot_healing_brush_inpaint(
 
         if not lama_used:
             base_healed = cv2.inpaint(color_neutral_rgb, fused_mask, inpaintRadius=max(3, dilate_px + 2), flags=cv2.INPAINT_TELEA)
-
-    # 3.5. Second pass for large blemishes (>10px radius): heal the inner core
-    # Pass 1 handled the outer halo (erythema), Pass 2 handles the textured core.
-    # This two-stage approach mimics professional retouching: "feather outward, stamp inward."
-    if np.sum(large_blemish_cores > 0) > 0 and lama_model is not None:
-        try:
-            from inpainter import inpaint_with_context_tiling
-            
-            # Extract LF from the Pass-1 healed result
-            lf_pass1 = cv2.GaussianBlur(base_healed.astype(np.float32), (15, 15), 0)
-            hf_pass1 = base_healed.astype(np.float32) - lf_pass1
-            
-            # Heal the core's LF base
-            lf_pass2 = inpaint_with_context_tiling(
-                model=lama_model,
-                img_rgb=np.clip(lf_pass1, 0, 255).astype(np.uint8),
-                mask_gray=large_blemish_cores,
-                max_tile_size=768,
-                context_pad=40
-            )
-            
-            # Reconstruct with 85% HF fade (aggressive on core texture)
-            core_fade = cv2.GaussianBlur(large_blemish_cores.astype(np.float32) / 255.0, (7, 7), 0)[:, :, None]
-            hf_pass2_blend = hf_pass1 * (1.0 - core_fade * 0.85)
-            base_healed = np.clip(lf_pass2.astype(np.float32) + hf_pass2_blend, 0, 255).astype(np.uint8)
-        except Exception as e:
-            logger.warning(f"Second-pass core healing failed, using single-pass result: {e}")
 
     # 4. Skin Texture & Pore Preservation
     orig_f = img_rgb.astype(np.float32)

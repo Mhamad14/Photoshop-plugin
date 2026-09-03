@@ -29,6 +29,10 @@ def is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
 def find_available_port(preferred_port: int = 8765, host: str = "127.0.0.1") -> int:
     if not is_port_in_use(preferred_port, host):
         return preferred_port
+    # Give Windows TIME_WAIT a brief moment (1.5s) to release the port
+    time.sleep(1.5)
+    if not is_port_in_use(preferred_port, host):
+        return preferred_port
     print(f"[!] Port {preferred_port} is busy. Probing alternative ports...")
     for alt_port in [8766, 8001, 9001, 5005]:
         if not is_port_in_use(alt_port, host):

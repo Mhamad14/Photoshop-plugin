@@ -183,7 +183,7 @@ def create_smooth_rgba_patch(
     even_redness_strength: float = 0.4,
     texture_keep: float = 0.85,
     feather_radius: int = 4
-) -> Tuple[np.ndarray, Dict[str, Any]]:
+) -> Image.Image:
     smoothed_rgb, effective_mask = apply_full_smooth(
         img_rgb=img_rgb,
         skin_mask=skin_mask,
@@ -198,12 +198,5 @@ def create_smooth_rgba_patch(
     rgba[:, :, :3] = smoothed_rgb
     rgba[:, :, 3] = effective_mask
 
-    meta = {
-        "strength": strength,
-        "texture_keep": texture_keep,
-        "even_redness_strength": even_redness_strength,
-        "feather_radius": feather_radius,
-        "layer_name": f"AI Skin Smoothing ({int(strength * 100)}%)"
-    }
+    return Image.fromarray(rgba)
 
-    return rgba, meta

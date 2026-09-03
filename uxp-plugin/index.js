@@ -269,13 +269,14 @@ function dataUrlToBlob(dataUrl, mime = "image/png") {
 }
 /* ============================== SERVER STATUS ============================== */
 async function checkServerStatus() {
+  if (isProcessing) return;
+
   const current = getServerUrl();
   const candidateUrls = [
     current,
     "http://127.0.0.1:8765",
-    "http://localhost:8765",
     "http://127.0.0.1:8766",
-    "http://localhost:8766",
+    "http://localhost:8765",
     "http://127.0.0.1:8001"
   ].filter((v, i, a) => v && a.indexOf(v) === i);
 
@@ -285,7 +286,7 @@ async function checkServerStatus() {
   for (const baseUrl of candidateUrls) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3500);
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
       const response = await fetch(`${baseUrl}/health`, { method: "GET", signal: controller.signal });
       clearTimeout(timeoutId);
 
@@ -299,6 +300,16 @@ async function checkServerStatus() {
         return;
       }
     } catch (e) { /* try next */ }
+  }
+
+  if (isServerOnline) {
+    try {
+      const res = await fetch(`${current}/health`, { method: "GET" });
+      if (res.ok) {
+        isServerOnline = true;
+        return;
+      }
+    } catch (e) {}
   }
 
   isServerOnline = false;
@@ -989,54 +1000,44 @@ async function createMaskedToneLiftLayer() {
 }
 
 async function groupRetouchLayers(groupName, layerNames = [], layerIds = []) {
-  const validIds = (layerIds || []).filter(id => id != null);
-  const validNames = (layerNames || []).filter(n => Boolean(n));
-  if (validIds.length < 2 && validNames.length < 2) return;
+  const validNames = (layerNames || []).filter(Boolean);
+  if (validNames.length < 2) return;
 
   try {
     await core.executeAsModal(async () => {
+      const doc = app.activeDocument;
+      if (!doc) return;
+
       const selectCommands = [];
-      if (validIds.length >= 2) {
+      selectCommands.push({
+        _obj: "select",
+        _target: [{ _ref: "layer", _name: validNames[0] }],
+        makeVisible: false,
+        _options: { dialogOptions: "dontDisplay" }
+      });
+
+      for (let i = 1; i < validNames.length; i++) {
         selectCommands.push({
           _obj: "select",
-          _target: [{ _ref: "layer", _id: validIds[0] }],
+          _target: [{ _ref: "layer", _name: validNames[i] }],
+          selectionModifier: { _enum: "selectionModifierType", _value: "addToSelection" },
           makeVisible: false,
           _options: { dialogOptions: "dontDisplay" }
         });
-        for (let i = 1; i < validIds.length; i++) {
-          selectCommands.push({
-            _obj: "select",
-            _target: [{ _ref: "layer", _id: validIds[i] }],
-            selectionModifier: { _enum: "selectionModifierType", _value: "addToSelection" },
-            makeVisible: false,
-            _options: { dialogOptions: "dontDisplay" }
-          });
-        }
-      } else {
-        selectCommands.push({
-          _obj: "select",
-          _target: [{ _ref: "layer", _name: validNames[0] }],
-          makeVisible: false,
-          _options: { dialogOptions: "dontDisplay" }
-        });
-        for (let i = 1; i < validNames.length; i++) {
-          selectCommands.push({
-            _obj: "select",
-            _target: [{ _ref: "layer", _name: validNames[i] }],
-            selectionModifier: { _enum: "selectionModifierType", _value: "addToSelection" },
-            makeVisible: false,
-            _options: { dialogOptions: "dontDisplay" }
-          });
-        }
       }
+
       selectCommands.push({
         _obj: "make",
         _target: [{ _ref: "layerSection" }],
-        from: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }],
+        from: { _ref: "layer", _enum: "ordinal", _value: "targetEnum" },
         name: groupName,
         _options: { dialogOptions: "dontDisplay" }
       });
-      await action.batchPlay(selectCommands, {});
+
+      await action.batchPlay(selectCommands, {
+        modalBehavior: "fail",
+        synchronousExecution: false
+      });
     }, { commandName: `Group ${groupName}` });
   } catch (groupErr) {
     logDebug(`Layer grouping note: ${groupErr.message || groupErr}`, "warn");
@@ -1553,12 +1554,18 @@ btnApplyAll.addEventListener("click", async () => {
         dbForm.append("grain_intensity", healChainParams.grain_intensity);
       }
 
-      const dbRes = await fetch(`${getServerUrl()}/apply-dodge-burn`, { method: "POST", body: dbForm });
-      if (dbRes.ok) {
-        const dbBuffer = await (await dbRes.blob()).arrayBuffer();
-        const dbid = await placePatchAsLayer(dbBuffer, "dodge_burn_layer.png", "AI Dodge & Burn");
-        placedNames.push("AI Dodge & Burn");
-        if (dbid) placedIds.push(dbid);
+      try {
+        const dbRes = await fetch(`${getServerUrl()}/apply-dodge-burn`, { method: "POST", body: dbForm });
+        if (dbRes.ok) {
+          const dbBuffer = await (await dbRes.blob()).arrayBuffer();
+          const dbid = await placePatchAsLayer(dbBuffer, "dodge_burn_layer.png", "AI Dodge & Burn");
+          placedNames.push("AI Dodge & Burn");
+          if (dbid) placedIds.push(dbid);
+        } else {
+          logDebug(`[APPLY] Dodge & Burn response: ${await dbRes.text()}`, "warn");
+        }
+      } catch (dbErr) {
+        logDebug(`[APPLY] Dodge & Burn skipped: ${dbErr.message}`, "warn");
       }
     }
 
@@ -1567,26 +1574,32 @@ btnApplyAll.addEventListener("click", async () => {
       applyBtnText.textContent = "Smoothing skin\u2026";
       setLog("Frequency-separation smoothing\u2026", "info");
 
-      const smoothForm = new FormData();
-      smoothForm.append("image", portraitBlob, "portrait.png");
-      smoothForm.append("strength", (parseInt(sliderSmoothStrength.value, 10) / 100).toString());
-      smoothForm.append("texture_keep", (parseInt(sliderTextureKeep.value, 10) / 100).toString());
-      smoothForm.append("feather_radius", sliderFeather.value);
-      if (currentSkinMaskBlob) smoothForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
-      if (healChainActive) {
-        smoothForm.append("blobs_json", JSON.stringify(healChainBlobs));
-        smoothForm.append("heal_mode", healChainParams.heal_mode);
-        smoothForm.append("texture_blend", healChainParams.texture_blend);
-        smoothForm.append("grain_intensity", healChainParams.grain_intensity);
+      try {
+        const smoothForm = new FormData();
+        smoothForm.append("image", portraitBlob, "portrait.png");
+        smoothForm.append("strength", (parseInt(sliderSmoothStrength.value, 10) / 100).toString());
+        smoothForm.append("texture_keep", (parseInt(sliderTextureKeep.value, 10) / 100).toString());
+        smoothForm.append("feather_radius", sliderFeather.value);
+        if (currentSkinMaskBlob) smoothForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
+        if (healChainActive) {
+          smoothForm.append("blobs_json", JSON.stringify(healChainBlobs));
+          smoothForm.append("heal_mode", healChainParams.heal_mode);
+          smoothForm.append("texture_blend", healChainParams.texture_blend);
+          smoothForm.append("grain_intensity", healChainParams.grain_intensity);
+        }
+
+        const smoothRes = await fetch(`${getServerUrl()}/apply-smooth`, { method: "POST", body: smoothForm });
+        if (smoothRes.ok) {
+          const smoothBuffer = await (await smoothRes.blob()).arrayBuffer();
+          const smid = await placePatchAsLayer(smoothBuffer, "smoothed_layer.png", "AI Smoothed Skin");
+          placedNames.push("AI Smoothed Skin");
+          if (smid) placedIds.push(smid);
+        } else {
+          logDebug(`[APPLY] Smoothing response: ${await smoothRes.text()}`, "warn");
+        }
+      } catch (smoothErr) {
+        logDebug(`[APPLY] Smoothing skipped: ${smoothErr.message}`, "warn");
       }
-
-      const smoothRes = await fetch(`${getServerUrl()}/apply-smooth`, { method: "POST", body: smoothForm });
-      if (!smoothRes.ok) throw new Error(`Smoothing failed: ${await smoothRes.text()}`);
-
-      const smoothBuffer = await (await smoothRes.blob()).arrayBuffer();
-      const smid = await placePatchAsLayer(smoothBuffer, "smoothed_layer.png", "AI Smoothed Skin");
-      placedNames.push("AI Smoothed Skin");
-      if (smid) placedIds.push(smid);
     }
 
     /* ACTION 4: AI Skin Tone Harmonization & Lift */
@@ -1594,25 +1607,35 @@ btnApplyAll.addEventListener("click", async () => {
       applyBtnText.textContent = "Applying Skin Tone Lift\u2026";
       setLog("AI Skin Tone Harmonization\u2026", "info");
 
-      const lightenForm = new FormData();
-      lightenForm.append("image", portraitBlob, "portrait.png");
-      lightenForm.append("strength", (parseInt(sliderStrength.value, 10) / 100).toString());
-      lightenForm.append("feather_radius", sliderFeather ? sliderFeather.value : "4");
-      lightenForm.append("base_tone_lab", JSON.stringify(sampledBaseTone.lab));
-      if (currentSkinMaskBlob) lightenForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
-      if (healChainActive) {
-        lightenForm.append("blobs_json", JSON.stringify(healChainBlobs));
-        lightenForm.append("heal_mode", healChainParams.heal_mode);
-        lightenForm.append("texture_blend", healChainParams.texture_blend);
-        lightenForm.append("grain_intensity", healChainParams.grain_intensity);
-      }
+      try {
+        const lightenForm = new FormData();
+        lightenForm.append("image", portraitBlob, "portrait.png");
+        lightenForm.append("strength", (parseInt(sliderStrength.value, 10) / 100).toString());
+        lightenForm.append("feather_radius", sliderFeather ? sliderFeather.value : "4");
+        lightenForm.append("base_tone_lab", JSON.stringify(sampledBaseTone.lab));
+        if (currentSkinMaskBlob) lightenForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
+        if (healChainActive) {
+          lightenForm.append("blobs_json", JSON.stringify(healChainBlobs));
+          lightenForm.append("heal_mode", healChainParams.heal_mode);
+          lightenForm.append("texture_blend", healChainParams.texture_blend);
+          lightenForm.append("grain_intensity", healChainParams.grain_intensity);
+        }
+        if (doSmooth) {
+          lightenForm.append("smooth_strength", (parseInt(sliderSmoothStrength.value, 10) / 100).toString());
+          lightenForm.append("texture_keep", (parseInt(sliderTextureKeep.value, 10) / 100).toString());
+        }
 
-      const lightenRes = await fetch(`${getServerUrl()}/apply-lighten`, { method: "POST", body: lightenForm });
-      if (lightenRes.ok) {
-        const lightenBuffer = await (await lightenRes.blob()).arrayBuffer();
-        const lid = await placePatchAsLayer(lightenBuffer, "lighten_layer.png", "AI Skin Tone Lift");
-        placedNames.push("AI Skin Tone Lift");
-        if (lid) placedIds.push(lid);
+        const lightenRes = await fetch(`${getServerUrl()}/apply-lighten`, { method: "POST", body: lightenForm });
+        if (lightenRes.ok) {
+          const lightenBuffer = await (await lightenRes.blob()).arrayBuffer();
+          const lid = await placePatchAsLayer(lightenBuffer, "lighten_layer.png", "AI Skin Tone Lift");
+          placedNames.push("AI Skin Tone Lift");
+          if (lid) placedIds.push(lid);
+        } else {
+          logDebug(`[APPLY] Skin Tone Lift response: ${await lightenRes.text()}`, "warn");
+        }
+      } catch (lightenErr) {
+        logDebug(`[APPLY] Skin Tone Lift skipped: ${lightenErr.message}`, "warn");
       }
     }
 
@@ -1621,18 +1644,24 @@ btnApplyAll.addEventListener("click", async () => {
       applyBtnText.textContent = "Enhancing eyes & teeth\u2026";
       setLog("AI teeth whitening & iris sparkle\u2026", "info");
 
-      const eyeForm = new FormData();
-      eyeForm.append("image", portraitBlob, "portrait.png");
-      eyeForm.append("teeth_whiten", (parseInt(sliderTeeth.value, 10) / 100).toString());
-      eyeForm.append("eye_brighten", (parseInt(sliderEyes.value, 10) / 100).toString());
-      eyeForm.append("feather_radius", "3");
+      try {
+        const eyeForm = new FormData();
+        eyeForm.append("image", portraitBlob, "portrait.png");
+        eyeForm.append("teeth_whiten", (parseInt(sliderTeeth.value, 10) / 100).toString());
+        eyeForm.append("eye_brighten", (parseInt(sliderEyes.value, 10) / 100).toString());
+        eyeForm.append("feather_radius", "3");
 
-      const eyeRes = await fetch(`${getServerUrl()}/apply-eye-teeth`, { method: "POST", body: eyeForm });
-      if (eyeRes.ok) {
-        const eyeBuffer = await (await eyeRes.blob()).arrayBuffer();
-        const etid = await placePatchAsLayer(eyeBuffer, "eyes_teeth_layer.png", "AI Eyes & Teeth");
-        placedNames.push("AI Eyes & Teeth");
-        if (etid) placedIds.push(etid);
+        const eyeRes = await fetch(`${getServerUrl()}/apply-eye-teeth`, { method: "POST", body: eyeForm });
+        if (eyeRes.ok) {
+          const eyeBuffer = await (await eyeRes.blob()).arrayBuffer();
+          const etid = await placePatchAsLayer(eyeBuffer, "eyes_teeth_layer.png", "AI Eyes & Teeth");
+          placedNames.push("AI Eyes & Teeth");
+          if (etid) placedIds.push(etid);
+        } else {
+          logDebug(`[APPLY] Eyes & Teeth response: ${await eyeRes.text()}`, "warn");
+        }
+      } catch (eyeErr) {
+        logDebug(`[APPLY] Eyes & Teeth skipped: ${eyeErr.message}`, "warn");
       }
     }
 
@@ -1641,24 +1670,30 @@ btnApplyAll.addEventListener("click", async () => {
       applyBtnText.textContent = "Defusing shine\u2026";
       setLog("AI specular shine reduction\u2026", "info");
 
-      const shineForm = new FormData();
-      shineForm.append("image", portraitBlob, "portrait.png");
-      shineForm.append("strength", (parseInt(sliderShine.value, 10) / 100).toString());
-      shineForm.append("feather_radius", "4");
-      if (currentSkinMaskBlob) shineForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
-      if (healChainActive) {
-        shineForm.append("blobs_json", JSON.stringify(healChainBlobs));
-        shineForm.append("heal_mode", healChainParams.heal_mode);
-        shineForm.append("texture_blend", healChainParams.texture_blend);
-        shineForm.append("grain_intensity", healChainParams.grain_intensity);
-      }
+      try {
+        const shineForm = new FormData();
+        shineForm.append("image", portraitBlob, "portrait.png");
+        shineForm.append("strength", (parseInt(sliderShine.value, 10) / 100).toString());
+        shineForm.append("feather_radius", "4");
+        if (currentSkinMaskBlob) shineForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
+        if (healChainActive) {
+          shineForm.append("blobs_json", JSON.stringify(healChainBlobs));
+          shineForm.append("heal_mode", healChainParams.heal_mode);
+          shineForm.append("texture_blend", healChainParams.texture_blend);
+          shineForm.append("grain_intensity", healChainParams.grain_intensity);
+        }
 
-      const shineRes = await fetch(`${getServerUrl()}/apply-shine-neutralize`, { method: "POST", body: shineForm });
-      if (shineRes.ok) {
-        const shineBuffer = await (await shineRes.blob()).arrayBuffer();
-        const shid = await placePatchAsLayer(shineBuffer, "anti_shine_layer.png", "AI Anti-Glare Shine");
-        placedNames.push("AI Anti-Glare Shine");
-        if (shid) placedIds.push(shid);
+        const shineRes = await fetch(`${getServerUrl()}/apply-shine-neutralize`, { method: "POST", body: shineForm });
+        if (shineRes.ok) {
+          const shineBuffer = await (await shineRes.blob()).arrayBuffer();
+          const shid = await placePatchAsLayer(shineBuffer, "anti_shine_layer.png", "AI Anti-Glare Shine");
+          placedNames.push("AI Anti-Glare Shine");
+          if (shid) placedIds.push(shid);
+        } else {
+          logDebug(`[APPLY] Anti-Glare Shine response: ${await shineRes.text()}`, "warn");
+        }
+      } catch (shineErr) {
+        logDebug(`[APPLY] Anti-Glare Shine skipped: ${shineErr.message}`, "warn");
       }
     }
 
