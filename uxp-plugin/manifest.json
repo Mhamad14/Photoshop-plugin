@@ -4,12 +4,13 @@
   "version": "1.0.0",
   "main": "index.html",
   "manifestVersion": 5,
-  "host": [
-    {
-      "app": "PS",
-      "minVersion": "23.0.0"
+  "host": {
+    "app": "PS",
+    "minVersion": "23.0.0",
+    "data": {
+      "apiVersion": 2
     }
-  ],
+  },
   "entrypoints": [
     {
       "type": "panel",
