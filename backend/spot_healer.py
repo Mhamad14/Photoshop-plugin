@@ -51,9 +51,21 @@ def neutralize_erythema_annulus(
 
     # Localized spatial baseline sampling
     sigma = max(4.0, min(h, w) * 0.012)
-    norm_w = cv2.GaussianBlur(skin_weight, (0, 0), sigma) + 1e-5
-    blurred_a = cv2.GaussianBlur(a_c * skin_weight, (0, 0), sigma)
-    blurred_b = cv2.GaussianBlur(b_c * skin_weight, (0, 0), sigma)
+    if min(h, w) > 1500:
+        ds = 4
+        sw_s = cv2.resize(skin_weight, (w // ds, h // ds), interpolation=cv2.INTER_AREA)
+        a_s = cv2.resize(a_c * skin_weight, (w // ds, h // ds), interpolation=cv2.INTER_AREA)
+        b_s = cv2.resize(b_c * skin_weight, (w // ds, h // ds), interpolation=cv2.INTER_AREA)
+        nw_s = cv2.GaussianBlur(sw_s, (0, 0), sigma / ds) + 1e-5
+        ba_s = cv2.GaussianBlur(a_s, (0, 0), sigma / ds)
+        bb_s = cv2.GaussianBlur(b_s, (0, 0), sigma / ds)
+        norm_w = cv2.resize(nw_s, (w, h), interpolation=cv2.INTER_LINEAR)
+        blurred_a = cv2.resize(ba_s, (w, h), interpolation=cv2.INTER_LINEAR)
+        blurred_b = cv2.resize(bb_s, (w, h), interpolation=cv2.INTER_LINEAR)
+    else:
+        norm_w = cv2.GaussianBlur(skin_weight, (0, 0), sigma) + 1e-5
+        blurred_a = cv2.GaussianBlur(a_c * skin_weight, (0, 0), sigma)
+        blurred_b = cv2.GaussianBlur(b_c * skin_weight, (0, 0), sigma)
 
     healthy_a = np.where(norm_w > 1e-3, blurred_a / norm_w, a_c)
     healthy_b = np.where(norm_w > 1e-3, blurred_b / norm_w, b_c)
@@ -68,12 +80,14 @@ def neutralize_erythema_annulus(
     excess_b = np.clip(b_c - healthy_b, -8.0, 8.0)
     b_corrected = b_c - (excess_b * core_factor * support * 0.20)
 
-    # Ensure natural human warmth floor
-    a_corrected = np.maximum(a_corrected, 130.0)
-    b_corrected = np.maximum(b_corrected, 128.0)
+    # Ensure natural human warmth floor ONLY on active blemish cores within valid skin
+    a_final = np.where(core_factor > 0, np.maximum(a_corrected, 130.0), a_c)
+    b_final = np.where(core_factor > 0, np.maximum(b_corrected, 128.0), b_c)
 
-    lab_clean = cv2.merge([l_c, a_corrected, b_corrected]).clip(0, 255).astype(np.uint8)
-    return cv2.cvtColor(lab_clean, cv2.COLOR_LAB2RGB)
+    lab_clean = cv2.merge([l_c, a_final, b_final]).clip(0, 255).astype(np.uint8)
+    clean_rgb = cv2.cvtColor(lab_clean, cv2.COLOR_LAB2RGB)
+    # Outside the blemish mask, strictly return original img_rgb
+    return np.where(blemish_bin[:, :, None] > 0, clean_rgb, img_rgb)
 
 
 def spot_healing_brush_inpaint(
@@ -195,5 +209,7 @@ def spot_healing_brush_inpaint(
 
     alpha_f = (feathered_alpha.astype(np.float32) / 255.0)[:, :, None]
     final_composite = (orig_f * (1.0 - alpha_f) + healed_f * alpha_f).clip(0, 255).astype(np.uint8)
+    # Outside feathered blemish mask, strictly guarantee original bit-for-bit pixels
+    final_composite = np.where(feathered_alpha[:, :, None] > 0, final_composite, img_rgb)
 
     return final_composite, feathered_alpha

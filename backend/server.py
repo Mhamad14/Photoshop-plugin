@@ -66,7 +66,7 @@ def get_image_signature(img_rgb: np.ndarray, extra_key: str = "") -> str:
     return hashlib.md5(f"{w}x{h}_{len(sample)}_{extra_key}".encode() + sample).hexdigest()
 
 def get_cached_skin_mask(img_rgb: np.ndarray, include_neck: bool = True, feather_radius: int = 3):
-    sig = get_image_signature(img_rgb, f"neck_{include_neck}_fea_{feather_radius}")
+    sig = get_image_signature(img_rgb, f"v3_neck_{include_neck}_fea_{feather_radius}")
     if sig in _MASK_CACHE:
         logger.info("Using cached skin segmentation mask (instant 0.00s hit).")
         cached = _MASK_CACHE[sig]
@@ -106,6 +106,32 @@ def save_config(data: dict):
             json.dump(data, f, indent=2)
     except Exception as e:
         logger.error(f"Failed to save config: {e}")
+
+
+def anchor_corners_rgba(rgba_img: Image.Image, border_w: int = 12) -> Image.Image:
+    """
+    Guarantees that a transparent RGBA image maintains its full canvas dimensions
+    when placed in Photoshop.
+    Photoshop's placeEvent builds an internal pyramid mipmap and trims fully transparent
+    borders, centering the trimmed bounding box.
+    Setting a solid 12-pixel border along all 4 canvas edges (top, bottom, left, right)
+    with alpha=255 and preserving the original RGB pixel colors forces Photoshop to
+    recognize the full (W, H) canvas bounds at ALL mipmap levels, guaranteeing 1:1
+    pixel-perfect placement at (0, 0).
+    """
+    if rgba_img.mode != "RGBA":
+        rgba_img = rgba_img.convert("RGBA")
+    w, h = rgba_img.size
+    if w > 4 and h > 4:
+        arr = np.array(rgba_img)
+        bw = min(border_w, min(h, w) // 10)
+        if bw > 0:
+            arr[:bw, :, 3] = 255
+            arr[-bw:, :, 3] = 255
+            arr[:, :bw, 3] = 255
+            arr[:, -bw:, 3] = 255
+            return Image.fromarray(arr, mode="RGBA")
+    return rgba_img
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -251,13 +277,16 @@ def neutralize_erythema(img_rgb: np.ndarray, mask_gray: np.ndarray) -> np.ndarra
     a_corrected = a_c - (excess_a * mask_factor * support * 0.80)
     b_corrected = b_c - ((b_c - healthy_b) * mask_factor * support * 0.30)
 
-    # Warmth floor: skin must never become gray
-    a_corrected = np.maximum(a_corrected, 132.0)
-    b_corrected = np.maximum(b_corrected, 130.0)
+    # Warmth floor: skin must never become gray - ONLY within dilated blemish mask
+    a_final = np.where(dilated_mask > 0, np.maximum(a_corrected, 132.0), a_c)
+    b_final = np.where(dilated_mask > 0, np.maximum(b_corrected, 130.0), b_c)
 
     # Merge and return corrected LAB
-    lab_clean = cv2.merge([l_c, a_corrected, b_corrected]).clip(0, 255).astype(np.uint8)
-    return cv2.cvtColor(lab_clean, cv2.COLOR_LAB2RGB)
+    lab_clean = cv2.merge([l_c, a_final, b_final]).clip(0, 255).astype(np.uint8)
+    clean_rgb = cv2.cvtColor(lab_clean, cv2.COLOR_LAB2RGB)
+    # Outside the blemish mask, strictly return original img_rgb
+    return np.where(dilated_mask[:, :, None] > 0, clean_rgb, img_rgb)
+
 
 
 def blend_skin_texture(
@@ -1074,7 +1103,8 @@ async def apply_heal(
     heal_mode: str = Form("full_inpaint", description="'full_inpaint' | 'calm_redness' | 'flatten_bump'"),
     texture_blend: float = Form(0.25, description="Skin texture blend ratio (0.0 to 1.0)"),
     feather_radius: int = Form(3, description="Feather blur radius in pixels"),
-    grain_intensity: float = Form(0.03, description="Micro-grain intensity")
+    grain_intensity: float = Form(0.03, description="Micro-grain intensity"),
+    resolution: Optional[float] = Form(None, description="Document DPI resolution")
 ):
     """
     Layer 5 Action 1: Remove/Hide Pimples via Context-Tiled Inpainting or Dermatological Calming.
@@ -1135,7 +1165,7 @@ async def apply_heal(
     if healed_count == 0:
         transparent_empty = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         out_buf = io.BytesIO()
-        transparent_empty.save(out_buf, format="PNG")
+        anchor_corners_rgba(transparent_empty).save(out_buf, format="PNG", optimize=True)
         return Response(content=out_buf.getvalue(), media_type="image/png", headers={"X-Healed-Pixels": "0"})
 
     # Facial skin segmentation for the healer: with it, the erythema baseline
@@ -1174,15 +1204,21 @@ async def apply_heal(
 
     healed_rgb, feathered_alpha = await run_in_threadpool(_do_heal)
 
-    # 5. Build transparent RGBA PNG for non-destructive placement
+    # 5. Build transparent RGBA layer containing ONLY the healed blemish spots
+    # Outside blemishes, alpha is 0 (100% transparent). anchor_corners_rgba sets alpha=1
+    # at the 4 canvas corners so Photoshop places the layer with 1:1 canvas alignment.
     r = Image.fromarray(healed_rgb[:, :, 0])
     g = Image.fromarray(healed_rgb[:, :, 1])
     b = Image.fromarray(healed_rgb[:, :, 2])
     a = Image.fromarray(feathered_alpha)
-    rgba_result = Image.merge("RGBA", (r, g, b, a))
+    rgba_result = anchor_corners_rgba(Image.merge("RGBA", (r, g, b, a)))
 
+    dpi = (int(resolution), int(resolution)) if resolution and resolution > 0 else pil_image.info.get("dpi")
     out_buf = io.BytesIO()
-    rgba_result.save(out_buf, format="PNG", optimize=True)
+    if dpi:
+        rgba_result.save(out_buf, format="PNG", optimize=True, dpi=dpi)
+    else:
+        rgba_result.save(out_buf, format="PNG", optimize=True)
     total_time = time.time() - t_start
 
     logger.info(f"Apply-heal completed in {total_time:.3f}s (mode={heal_mode})")
@@ -1265,7 +1301,8 @@ async def apply_smooth(
     blobs_json: Optional[str] = Form(None, description="Active heal blobs: composite heal first so smoothed pixels are blemish-free"),
     heal_mode: str = Form("full_inpaint", description="Heal mode used for the upstream composite"),
     texture_blend: float = Form(0.25, description="Heal texture blend (upstream composite)"),
-    grain_intensity: float = Form(0.03, description="Heal micro-grain (upstream composite)")
+    grain_intensity: float = Form(0.03, description="Heal micro-grain (upstream composite)"),
+    resolution: Optional[float] = Form(None, description="Document DPI resolution")
 ):
     """
     Layer 5 Action: Smooth Skin.
@@ -1313,8 +1350,12 @@ async def apply_smooth(
 
     rgba_patch = await run_in_threadpool(_do_smooth)
 
+    dpi = (int(resolution), int(resolution)) if resolution and resolution > 0 else pil_image.info.get("dpi")
     out_buf = io.BytesIO()
-    rgba_patch.save(out_buf, format="PNG", optimize=True)
+    if dpi:
+        anchor_corners_rgba(rgba_patch).save(out_buf, format="PNG", optimize=True, dpi=dpi)
+    else:
+        anchor_corners_rgba(rgba_patch).save(out_buf, format="PNG", optimize=True)
     total_time = time.time() - t_start
     logger.info(f"Apply-smooth completed in {total_time:.3f}s (strength={strength}, keep={texture_keep})")
     return Response(
@@ -1338,8 +1379,9 @@ async def apply_lighten(
     heal_mode: str = Form("full_inpaint", description="Heal mode used for the upstream composite"),
     texture_blend: float = Form(0.25, description="Heal texture blend (upstream composite)"),
     grain_intensity: float = Form(0.03, description="Heal micro-grain (upstream composite)"),
-    smooth_strength: float = Form(0.0, description="Optional upstream smooth strength"),
-    texture_keep: float = Form(0.85, description="Optional upstream smooth texture retention")
+    smooth_strength: Optional[float] = Form(None, description="Upstream smooth strength 0-1"),
+    texture_keep: Optional[float] = Form(None, description="Upstream smooth texture retention 0-1"),
+    resolution: Optional[float] = Form(None, description="Document DPI resolution")
 ):
     """
     Layer 5 Action 2: Lighten Skin.
@@ -1381,15 +1423,15 @@ async def apply_lighten(
     )
 
     # 2. If smoothing was active upstream, smooth the base before tone lifting
-    if smooth_strength > 0:
+    if smooth_strength is not None and smooth_strength > 0:
         try:
             from skin_smoother import apply_full_smooth
             img_rgb, _ = apply_full_smooth(
                 img_rgb=img_rgb,
                 skin_mask=mask_np,
                 strength=smooth_strength,
-                even_redness_strength=0.35,
-                texture_keep=texture_keep,
+                even_redness_strength=0.0,
+                texture_keep=texture_keep if texture_keep is not None else 0.85,
                 feather_radius=feather_radius
             )
         except Exception as sm_err:
@@ -1414,8 +1456,12 @@ async def apply_lighten(
 
     rgba_patch = await run_in_threadpool(_do_lighten)
 
+    dpi = (int(resolution), int(resolution)) if resolution and resolution > 0 else pil_image.info.get("dpi")
     out_buf = io.BytesIO()
-    rgba_patch.save(out_buf, format="PNG", optimize=True)
+    if dpi:
+        anchor_corners_rgba(rgba_patch).save(out_buf, format="PNG", optimize=True, dpi=dpi)
+    else:
+        anchor_corners_rgba(rgba_patch).save(out_buf, format="PNG", optimize=True)
     total_time = time.time() - t_start
 
     logger.info(f"Apply-lighten completed in {total_time:.3f}s with strength {strength}")
@@ -1443,7 +1489,8 @@ async def apply_dodge_burn_endpoint(
     blobs_json: Optional[str] = Form(None, description="Active heal blobs: composite heal first so D&B is computed on blemish-free skin"),
     heal_mode: str = Form("full_inpaint", description="Heal mode used for the upstream composite"),
     texture_blend: float = Form(0.25, description="Heal texture blend (upstream composite)"),
-    grain_intensity: float = Form(0.03, description="Heal micro-grain (upstream composite)")
+    grain_intensity: float = Form(0.03, description="Heal micro-grain (upstream composite)"),
+    resolution: Optional[float] = Form(None, description="Document DPI resolution")
 ):
     """
     AI Dodge & Burn: Generates transparent RGBA patch evening out micro-shadows
@@ -1483,8 +1530,12 @@ async def apply_dodge_burn_endpoint(
         feather_radius=feather_radius
     )
 
+    dpi = (int(resolution), int(resolution)) if resolution and resolution > 0 else pil_image.info.get("dpi")
     out_buf = io.BytesIO()
-    rgba_patch.save(out_buf, format="PNG", optimize=True)
+    if dpi:
+        anchor_corners_rgba(rgba_patch).save(out_buf, format="PNG", optimize=True, dpi=dpi)
+    else:
+        anchor_corners_rgba(rgba_patch).save(out_buf, format="PNG", optimize=True)
     total_time = time.time() - t_start
 
     logger.info(f"Apply-dodge-burn completed in {total_time:.3f}s with strength {strength}")
@@ -1504,7 +1555,8 @@ async def apply_eye_teeth_endpoint(
     teeth_whiten: float = Form(0.5, ge=0.0, le=1.0, description="Teeth whitening strength"),
     eye_brighten: float = Form(0.5, ge=0.0, le=1.0, description="Eye sclera whitening strength"),
     iris_sparkle: float = Form(0.35, ge=0.0, le=1.0, description="Iris catchlight sparkle"),
-    feather_radius: int = Form(3, ge=0, le=10, description="Feather radius")
+    feather_radius: int = Form(3, ge=0, le=10, description="Feather radius"),
+    resolution: Optional[float] = Form(None, description="Document DPI resolution")
 ):
     """
     AI Eye & Teeth Retouching: Whitens teeth enamel, removes eye sclera bloodshot veins,
@@ -1527,8 +1579,12 @@ async def apply_eye_teeth_endpoint(
         feather_radius=feather_radius
     )
 
+    dpi = (int(resolution), int(resolution)) if resolution and resolution > 0 else pil_image.info.get("dpi")
     out_buf = io.BytesIO()
-    rgba_patch.save(out_buf, format="PNG", optimize=True)
+    if dpi:
+        anchor_corners_rgba(rgba_patch).save(out_buf, format="PNG", optimize=True, dpi=dpi)
+    else:
+        anchor_corners_rgba(rgba_patch).save(out_buf, format="PNG", optimize=True)
     total_time = time.time() - t_start
 
     logger.info(f"Apply-eye-teeth completed in {total_time:.3f}s")
@@ -1549,7 +1605,8 @@ async def apply_shine_neutralize_endpoint(
     blobs_json: Optional[str] = Form(None, description="Active heal blobs: composite heal first so shine removal is computed on blemish-free skin"),
     heal_mode: str = Form("full_inpaint", description="Heal mode used for the upstream composite"),
     texture_blend: float = Form(0.25, description="Heal texture blend (upstream composite)"),
-    grain_intensity: float = Form(0.03, description="Heal micro-grain (upstream composite)")
+    grain_intensity: float = Form(0.03, description="Heal micro-grain (upstream composite)"),
+    resolution: Optional[float] = Form(None, description="Document DPI resolution")
 ):
     """
     AI Shine & Flash Glare Neutralizer: Defuses harsh oily specular highlights on forehead, nose, and cheeks.
@@ -1588,8 +1645,12 @@ async def apply_shine_neutralize_endpoint(
         feather_radius=feather_radius
     )
 
+    dpi = (int(resolution), int(resolution)) if resolution and resolution > 0 else pil_image.info.get("dpi")
     out_buf = io.BytesIO()
-    rgba_patch.save(out_buf, format="PNG", optimize=True)
+    if dpi:
+        anchor_corners_rgba(rgba_patch).save(out_buf, format="PNG", optimize=True, dpi=dpi)
+    else:
+        anchor_corners_rgba(rgba_patch).save(out_buf, format="PNG", optimize=True)
     total_time = time.time() - t_start
 
     logger.info(f"Apply-shine-neutralize completed in {total_time:.3f}s")
@@ -1846,7 +1907,7 @@ async def detect_mask_endpoint(
     rgba_mask = Image.merge("RGBA", (r, g, b, Image.fromarray(pimple_mask)))
 
     out_buf = io.BytesIO()
-    rgba_mask.save(out_buf, format="PNG")
+    anchor_corners_rgba(rgba_mask).save(out_buf, format="PNG")
     return Response(content=out_buf.getvalue(), media_type="image/png")
 
 

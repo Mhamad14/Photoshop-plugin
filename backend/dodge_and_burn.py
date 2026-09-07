@@ -53,13 +53,26 @@ def generate_dodge_and_burn_map(
     # -------------------------------------------------------------
     # Macro scale (broad 3D facial lighting - cheekbones, jaw, nose contour)
     sigma_macro = max(18.0, min(h, w) * (0.05 * softness + 0.03))
-    norm_macro = cv2.GaussianBlur(skin_binary, (0, 0), sigma_macro) + 1e-5
-    l_macro = cv2.GaussianBlur(l_chan * skin_binary, (0, 0), sigma_macro) / norm_macro
-
-    # Micro scale (patchy blemish shadows, blotchy tone transitions)
     sigma_micro = max(3.5, sigma_macro * 0.25)
-    norm_micro = cv2.GaussianBlur(skin_binary, (0, 0), sigma_micro) + 1e-5
-    l_micro = cv2.GaussianBlur(l_chan * skin_binary, (0, 0), sigma_micro) / norm_micro
+
+    if min(h, w) > 1500:
+        ds = 4
+        sb_s = cv2.resize(skin_binary, (w // ds, h // ds), interpolation=cv2.INTER_AREA)
+        ls_s = cv2.resize(l_chan * skin_binary, (w // ds, h // ds), interpolation=cv2.INTER_AREA)
+
+        nm_s = cv2.GaussianBlur(sb_s, (0, 0), sigma_macro / ds) + 1e-5
+        lm_s = cv2.GaussianBlur(ls_s, (0, 0), sigma_macro / ds) / nm_s
+        l_macro = cv2.resize(lm_s, (w, h), interpolation=cv2.INTER_LINEAR)
+
+        nu_s = cv2.GaussianBlur(sb_s, (0, 0), sigma_micro / ds) + 1e-5
+        lu_s = cv2.GaussianBlur(ls_s, (0, 0), sigma_micro / ds) / nu_s
+        l_micro = cv2.resize(lu_s, (w, h), interpolation=cv2.INTER_LINEAR)
+    else:
+        norm_macro = cv2.GaussianBlur(skin_binary, (0, 0), sigma_macro) + 1e-5
+        l_macro = cv2.GaussianBlur(l_chan * skin_binary, (0, 0), sigma_macro) / norm_macro
+
+        norm_micro = cv2.GaussianBlur(skin_binary, (0, 0), sigma_micro) + 1e-5
+        l_micro = cv2.GaussianBlur(l_chan * skin_binary, (0, 0), sigma_micro) / norm_micro
 
     # The difference isolates ONLY micro-luminance discrepancies
     # lum_diff > 0: micro-shadow (needs dodging / lightening)
@@ -99,13 +112,16 @@ def generate_dodge_and_burn_map(
     if feather_radius > 0:
         ksize = feather_radius * 2 + 1
         feathered_alpha = cv2.GaussianBlur(skin_mask, (ksize, ksize), 0)
+        feathered_alpha = np.minimum(feathered_alpha, skin_mask)
     else:
         feathered_alpha = skin_mask.copy()
 
     alpha_f = (feathered_alpha.astype(np.float32) / 255.0)[:, :, None]
     composited_rgb = (img_rgb.astype(np.float32) * (1.0 - alpha_f) + corrected_rgb.astype(np.float32) * alpha_f).clip(0, 255).astype(np.uint8)
+    composited_rgb = np.where(skin_mask[:, :, None] > 0, composited_rgb, img_rgb)
 
     return composited_rgb, db_gray, feathered_alpha
+
 
 
 def apply_ai_dodge_and_burn(
@@ -135,5 +151,8 @@ def create_dodge_and_burn_rgba_patch(
     r = Image.fromarray(composited_rgb[:, :, 0])
     g = Image.fromarray(composited_rgb[:, :, 1])
     b = Image.fromarray(composited_rgb[:, :, 2])
+    # Transparent alpha: ONLY face skin parts have non-zero opacity! Outside is 100% transparent.
     a = Image.fromarray(alpha)
-    return Image.merge("RGBA", (r, g, b, a))
+    patch = Image.merge("RGBA", (r, g, b, a))
+    from server import anchor_corners_rgba
+    return anchor_corners_rgba(patch)

@@ -263,5 +263,8 @@ def create_eye_teeth_rgba_patch(
     r = Image.fromarray(composited_rgb[:, :, 0])
     g = Image.fromarray(composited_rgb[:, :, 1])
     b = Image.fromarray(composited_rgb[:, :, 2])
+    # Transparent alpha: ONLY eyes and teeth regions have non-zero opacity! Outside is 100% transparent.
     a = Image.fromarray(alpha)
-    return Image.merge("RGBA", (r, g, b, a))
+    patch = Image.merge("RGBA", (r, g, b, a))
+    from server import anchor_corners_rgba
+    return anchor_corners_rgba(patch)

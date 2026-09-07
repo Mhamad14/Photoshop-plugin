@@ -52,30 +52,66 @@ def compute_multi_scale_differential_energy(
     r = img_rgb[:, :, 0].astype(np.float32)
     g = img_rgb[:, :, 1].astype(np.float32)
 
-    # 1. Local Adaptive Redness Baseline (21-45px kernel to prevent cluster self-canceling)
+    # 1. Local Adaptive Redness Baseline (fast pyramid blur for high-res images)
     ksize_local = max(21, int(min(h, w) * 0.055) | 1)
-    blurred_skin_w = cv2.GaussianBlur(skin_float, (ksize_local, ksize_local), 0) + 1e-4
-    local_baseline_a = cv2.GaussianBlur(a_chan * skin_float, (ksize_local, ksize_local), 0) / blurred_skin_w
-    local_baseline_l = cv2.GaussianBlur(l_chan * skin_float, (ksize_local, ksize_local), 0) / blurred_skin_w
+    scale_down = max(1, int(min(h, w) / 1000.0))
+    if scale_down > 1:
+        small_h, small_w = max(1, h // scale_down), max(1, w // scale_down)
+        s_skin = cv2.resize(skin_float, (small_w, small_h), interpolation=cv2.INTER_AREA)
+        s_a = cv2.resize(a_chan * skin_float, (small_w, small_h), interpolation=cv2.INTER_AREA)
+        s_l = cv2.resize(l_chan * skin_float, (small_w, small_h), interpolation=cv2.INTER_AREA)
+
+        ksize_small = max(11, int(ksize_local / scale_down) | 1)
+        b_skin = cv2.GaussianBlur(s_skin, (ksize_small, ksize_small), 0) + 1e-4
+        b_a = cv2.GaussianBlur(s_a, (ksize_small, ksize_small), 0) / b_skin
+        b_l = cv2.GaussianBlur(s_l, (ksize_small, ksize_small), 0) / b_skin
+
+        local_baseline_a = cv2.resize(b_a, (w, h), interpolation=cv2.INTER_LINEAR)
+        local_baseline_l = cv2.resize(b_l, (w, h), interpolation=cv2.INTER_LINEAR)
+    else:
+        blurred_skin_w = cv2.GaussianBlur(skin_float, (ksize_local, ksize_local), 0) + 1e-4
+        local_baseline_a = cv2.GaussianBlur(a_chan * skin_float, (ksize_local, ksize_local), 0) / blurred_skin_w
+        local_baseline_l = cv2.GaussianBlur(l_chan * skin_float, (ksize_local, ksize_local), 0) / blurred_skin_w
 
     # Delta Redness (Erythema)
     delta_a = np.maximum(0.0, a_chan - local_baseline_a)
     norm_redness = np.maximum(0.0, (r - g) / (r + g + 18.0))
     erythema_signal = (delta_a * 0.75) + (norm_redness * 40.0 * 0.25)
 
-    # Whitehead Specular Core: Strictly gated by minimum redness so clean highlights NEVER trigger spots
+    # Whitehead Specular Core: Gated by localized contrast so highlights without texture are ignored
     raw_specular = np.maximum(0.0, l_chan - cv2.GaussianBlur(l_chan, (5, 5), 0))
-    specular_gate = np.clip((delta_a - 1.5) / 2.0, 0.0, 1.0)
+    specular_gate = np.clip((delta_a - 0.8) / 1.5, 0.0, 1.0)
     specular_signal = raw_specular * specular_gate
     
     # Post-inflammatory hyperpigmentation (Focal dark comedones)
     dark_comedone_signal = np.maximum(0.0, local_baseline_l - l_chan)
     dark_comedone_signal = np.clip(dark_comedone_signal * 0.45, 0.0, 20.0)
 
-    combined_signal = (erythema_signal * 0.75) + (specular_signal * 0.15) + (dark_comedone_signal * 0.10)
+    # 3D Raised Textural Bump Relief (gated so only focal bumps with contrast are captured)
+    k_bump = max(7, int(min(h, w) * 0.008) | 1)
+    bump_relief = np.maximum(0.0, l_chan - cv2.GaussianBlur(l_chan, (k_bump, k_bump), 0))
+    bump_signal = np.clip(bump_relief * 0.20, 0.0, 8.0)
 
-    # 2. Multi-Scale Difference of Gaussians (DoG) capturing all discrete blemish sizes (2.5px to 14px)
-    scales = [(0.8, 1.8), (1.2, 2.5), (1.8, 3.6), (2.6, 5.2), (3.8, 7.6), (5.0, 10.0)]
+    # Restored balanced signal: primary focus on real erythema/inflammation, specular whiteheads, and dark comedones
+    combined_signal = (erythema_signal * 0.70) + (specular_signal * 0.15) + (dark_comedone_signal * 0.15) + (bump_signal * 0.08)
+
+    # 2. Resolution-Adaptive Multi-Scale Difference of Gaussians (DoG)
+    res_factor = max(1.0, min(h, w) / 1200.0)
+    scale_factor = min(res_factor, 1.8)
+    base_scales = [
+        (0.8, 1.8),
+        (1.2, 2.5),
+        (1.8, 3.6),
+        (2.6, 5.2),
+        (3.8, 7.6),
+        (5.0, 10.0),
+        (7.0, 14.0),
+        (10.0, 20.0)
+    ]
+    scales = [
+        (max(0.6, round(s1 * scale_factor, 1)), max(1.2, round(s2 * scale_factor, 1)))
+        for s1, s2 in base_scales
+    ]
     dog_maps = []
     for s1, s2 in scales:
         g1 = cv2.GaussianBlur(combined_signal, (0, 0), s1)
@@ -98,31 +134,26 @@ def compute_multi_scale_differential_energy(
     lambda2 = (trace - disc) / 2.0
     coherence = (lambda1 - lambda2) / (lambda1 + lambda2 + 1e-4)
 
-    # Attenuate 1D directional creases (only extreme creases coherence > 0.75; never attenuate genuine erythema)
-    is_strong_erythema = (delta_a > 1.8)
-    crease_attenuation = np.clip(1.0 - (coherence - 0.72) * 3.5, 0.0, 1.0)
+    # Attenuate 1D directional creases (only extreme creases coherence > 0.78; never attenuate genuine erythema)
+    is_strong_erythema = (delta_a > 1.2)
+    crease_attenuation = np.clip(1.0 - (coherence - 0.78) * 3.5, 0.0, 1.0)
     crease_attenuation = np.where(is_strong_erythema, 1.0, crease_attenuation)
     spot_energy = spot_energy * crease_attenuation
 
     # 4. Strict Anatomical Feature & Cavity Exclusion Zones
-    # Protect Nostrils, Mouth Interior, Lips, and Clean Nose from false spot detection
-    dark_cavities = ((gray < 72.0) | (l_chan < 62.0)).astype(np.uint8) * 255
-    k_cav = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (23, 23))
+    # Protect true nostrils and inner mouth (deep black cavities < 28 L*) from false detection
+    dark_cavities = ((gray < 30.0) | (l_chan < 26.0)).astype(np.uint8) * 255
+    k_cav = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     dilated_cavities = cv2.dilate(dark_cavities, k_cav)
     spot_energy[dilated_cavities > 0] = 0.0
 
-    # Lip & Vermilion Border Exclusion (Mucosal red lips & mouth corners)
-    lip_heuristic = ((norm_redness > 0.16) & (l_chan < 145.0) & (b_chan < 148.0)).astype(np.uint8) * 255
-    k_lip = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17))
-    dilated_lips = cv2.dilate(lip_heuristic, k_lip)
-    spot_energy[dilated_lips > 0] = 0.0
-
-    # 5. Profile Contour Margin Protection
+    # 5. Profile Contour Margin Protection (preserves cheek, jawline, and forehead blemishes)
     if min(h, w) > 200:
-        margin_ksize = max(9, int(min(h, w) * 0.015) | 1)
+        margin_ksize = 3
         kernel_skin_margin = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (margin_ksize, margin_ksize))
         skin_inner = cv2.erode(skin_binary, kernel_skin_margin)
         spot_energy[skin_inner == 0] = 0.0
+
 
     return spot_energy, delta_a, coherence
 
@@ -133,7 +164,8 @@ def verify_annular_contrast(
     skin_binary: np.ndarray,
     cx: float,
     cy: float,
-    radius: int
+    radius: int,
+    sensitivity: float = 0.5
 ) -> Tuple[bool, float]:
     """
     Strict Dermatological Annular Contrast Verification:
@@ -142,7 +174,7 @@ def verify_annular_contrast(
     """
     h, w = img_rgb.shape[:2]
     ix, iy = int(round(cx)), int(round(cy))
-    r = max(3, min(12, int(round(radius))))
+    r = max(2, min(16, int(round(radius))))
 
     r_outer = int(round(r * 2.2)) + 1
     x1 = max(0, ix - r_outer)
@@ -161,18 +193,17 @@ def verify_annular_contrast(
     # Surrounding annulus (1.35r <= dist <= 2.2r)
     r_ann_in = int(round(r * 1.35))
     r_ann_out = int(round(r * 2.2))
-    annulus_mask = (dist_sq >= (r_ann_in * r_ann_in)) & (dist_sq <= (r_ann_out * r_ann_out)) & (skin_binary[y1:y2, x1:x2] > 0)
-
-    if np.sum(core_mask) < 3 or np.sum(annulus_mask) < 6:
-        return False, 0.0
 
     patch_lab = img_lab[y1:y2, x1:x2]
     l_chan = patch_lab[:, :, 0]
     a_chan = patch_lab[:, :, 1]
 
+    # Surrounding annulus (1.35r <= dist <= 2.2r), restricted to valid skin pixels above shadow floor
+    annulus_mask = (dist_sq >= (r_ann_in * r_ann_in)) & (dist_sq <= (r_ann_out * r_ann_out)) & (skin_binary[y1:y2, x1:x2] > 0) & (l_chan >= 35.0)
+
     # STRICT NOSTRIL & CAVITY REJECTION
     # Real skin/scabs have mean L* >= 35. Pure black cavities (nostril holes, open mouth) are < 32.
-    if np.mean(l_chan[core_mask]) < 36.0 or np.mean(l_chan[annulus_mask]) < 32.0:
+    if np.mean(l_chan[core_mask]) < 34.0 or np.mean(l_chan[annulus_mask]) < 30.0:
         return False, 0.0
 
     patch_rgb = img_rgb[y1:y2, x1:x2].astype(np.float32)
@@ -191,13 +222,22 @@ def verify_annular_contrast(
     ann_red = float(np.mean(patch_red_ratio[annulus_mask]))
     delta_red = core_red - ann_red
 
+    # Dynamic sensitivity scaling (higher sensitivity lowers threshold to catch smaller & subtle blemishes)
+    scale_sens = max(0.40, 1.35 - float(sensitivity) * 0.70)
+    th_a1 = 3.6 * scale_sens
+    th_red1 = 0.030 * scale_sens
+    th_a2 = 4.4 * scale_sens
+    th_red2 = 0.050 * scale_sens
+    th_whitehead_l = 4.2 * scale_sens
+    th_comedone_l = 4.5 * scale_sens
+
     # Strict Dermatological Lesion Criteria (prevents clean skin / JPEG noise hits)
     # 1. Inflamed Papule/Pustule: High localized erythema spike
-    is_inflamed = (delta_a >= 3.8 and delta_red >= 0.035) or (delta_a >= 4.8) or (delta_red >= 0.060)
+    is_inflamed = (delta_a >= th_a1 and delta_red >= th_red1) or (delta_a >= th_a2) or (delta_red >= th_red2)
     # 2. Whitehead: Distinct luminance peak with surrounding inflammatory redness
-    is_whitehead = (delta_l_white >= 5.0) and (delta_a >= 1.6 or delta_red >= 0.020)
+    is_whitehead = (delta_l_white >= th_whitehead_l) and (delta_a >= (1.2 * scale_sens) or delta_red >= (0.015 * scale_sens))
     # 3. Dark Comedone: Distinct localized pigment core drop
-    is_comedone = (delta_l_dark >= 5.5) and (delta_a >= 0.0)
+    is_comedone = (delta_l_dark >= th_comedone_l) and (delta_a >= -1.0)
 
     is_valid = is_inflamed or is_whitehead or is_comedone
     contrast_score = max(delta_a * 1.5, delta_red * 100.0, delta_l_white * 1.2, delta_l_dark * 1.0)
@@ -258,8 +298,13 @@ def refine_peak_and_radius(
 
     fitted_radius = int(np.percentile(radii, 70))
     fitted_radius = max(initial_r, fitted_radius)
-    # Add +2px margin to ensure full coverage of the surrounding red inflammatory halo
-    fitted_radius = max(5, min(18, fitted_radius + 2))
+    res_factor = max(1.0, min(w, h) / 1200.0)
+    scale_factor = min(res_factor, 2.5)
+    min_r = 3
+    max_r = max(24, int(round(18 * scale_factor)))
+    # Add tight halo margin (1-2px so small blemishes stay compact)
+    halo_margin = max(1, min(2, int(round(0.6 * scale_factor))))
+    fitted_radius = max(min_r, min(max_r, fitted_radius + halo_margin))
 
     return float(peak_x), float(peak_y), fitted_radius
 
@@ -393,11 +438,11 @@ def detect_pimple_candidates(
         max_val = float(np.max(skin_spots))
 
         # Balanced dynamic threshold scaling:
-        # Sens 0.1 (conservative) -> threshold ~ 1.05
-        # Sens 0.5 (balanced default) -> threshold ~ 0.72
-        # Sens 0.9 (maximum acne coverage) -> threshold ~ 0.42
+        # Sens 0.1 (conservative) -> threshold ~ 0.46
+        # Sens 0.5 (balanced default) -> threshold ~ 0.32
+        # Sens 0.9 (maximum acne & bump coverage) -> threshold ~ 0.18
         clamped_sens = max(0.05, min(1.0, sensitivity))
-        threshold = max(0.35, 1.15 - (clamped_sens - 0.1) * 0.92)
+        threshold = max(0.18, 0.46 - (clamped_sens - 0.1) * 0.35)
 
         if max_val >= threshold:
             candidate_mask = (spot_energy >= threshold).astype(np.uint8) * 255
@@ -419,7 +464,10 @@ def detect_pimple_candidates(
                 eff_r = max(3, int(round(math.sqrt(area / math.pi) * 1.25)))
                 px, py, fit_r = refine_peak_and_radius(spot_energy, delta_a, cx, cy, eff_r, search_window=3)
 
-                if fit_r < min_radius or fit_r > max_radius:
+                res_scale = min(max(1.0, min(w, h) / 1200.0), 2.5)
+                eff_max_r = max(max_radius, int(round(max_radius * res_scale)))
+
+                if fit_r < min_radius or fit_r > eff_max_r:
                     continue
 
                 ipx, ipy = int(round(px)), int(round(py))
@@ -427,15 +475,16 @@ def detect_pimple_candidates(
                     continue
 
                 # Structure tensor coherence check at peak (only true creases with low erythema)
-                if coherence[ipy, ipx] > 0.82 and delta_a[ipy, ipx] < 1.8:
+                if coherence[ipy, ipx] > 0.82 and delta_a[ipy, ipx] < 1.4:
                     continue
 
                 # Annular local contrast verification (Rejects clean forehead, cheeks, and neck shadows)
-                valid_spot, contrast_score = verify_annular_contrast(img_rgb, img_lab, skin_binary, px, py, fit_r)
+                valid_spot, contrast_score = verify_annular_contrast(img_rgb, img_lab, skin_binary, px, py, fit_r, sensitivity=sensitivity)
                 if not valid_spot:
                     # In acne clusters, neighboring pimples elevate annular redness.
                     # Keep clearly inflamed peaks that exceed baseline erythema:
-                    if delta_a[ipy, ipx] < 2.5 and spot_energy[ipy, ipx] < (threshold * 1.35):
+                    scale_sens = max(0.40, 1.35 - float(sensitivity) * 0.70)
+                    if delta_a[ipy, ipx] < (1.8 * scale_sens) and spot_energy[ipy, ipx] < (threshold * 1.25):
                         continue
 
                 blob_pixels = spot_energy[labels == i]

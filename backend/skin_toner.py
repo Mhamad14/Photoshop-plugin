@@ -39,56 +39,61 @@ def calculate_tone_lift(
     img_lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
     l_chan, a_chan, b_chan = cv2.split(img_lab)
 
-    # Determine baseline lightness L0
-    if base_tone_lab is not None and len(base_tone_lab) >= 1:
+    # Determine baseline lightness L0 from actual skin (ignoring dark beard/shadows < 80)
+    if base_tone_lab is not None and len(base_tone_lab) >= 1 and float(base_tone_lab[0]) > 100:
         base_l = float(base_tone_lab[0])
     else:
-        # Compute median lightness over skin mask
-        skin_l = l_chan[mask_binary > 0]
-        base_l = float(np.median(skin_l)) if len(skin_l) > 0 else 160.0
+        valid_skin_l = l_chan[(mask_binary > 0) & (l_chan > 80.0)]
+        base_l = float(np.median(valid_skin_l)) if len(valid_skin_l) > 0 else 160.0
 
     # Calculate smooth midtone lift
-    # Maximum boost in midtones, tapering off in deep shadows and bright highlights to prevent clipping
-    # L ranges from 0 to 255 in OpenCV LAB
     norm_l = l_chan / 255.0
-    # Bell curve weighting for natural photographic midtone enhancement
-    midtone_weight = 4.0 * norm_l * (1.0 - norm_l)
+    midtone_weight = 3.5 * norm_l * (1.0 - norm_l) ** 0.8
     
-    # Scale factor based on strength and base skin tone
-    # Darker skin tones get a rich luminous glow without chalkiness; lighter tones get porcelain clarity
-    tone_scale = max(0.6, min(1.4, (255.0 - base_l) / 128.0))
-    lift_amount = strength * 34.0 * tone_scale * midtone_weight
+    # Hair Protection Gate:
+    # Dark facial hair (beard, mustache, eyebrows with L* < 60) receives 0 boost,
+    # completely preventing facial hair from turning gray, chalky, or washed out.
+    hair_gate = np.clip((l_chan - 58.0) / 25.0, 0.0, 1.0)
 
-    new_l = np.clip(l_chan + lift_amount, 0, 255)
+    tone_scale = max(0.75, min(1.35, (255.0 - base_l) / 110.0))
+    lift_amount = strength * 46.0 * tone_scale * midtone_weight * hair_gate
 
-    # Tone-Adaptive Chroma Radiance (prevents ashy/chalky or jaundiced casts)
-    if base_l > 175:
-        # Fair/Porcelain skin: slight rose-alabaster warmth
-        chroma_a_boost = strength * 1.2 * midtone_weight
-        chroma_b_boost = strength * 0.6 * midtone_weight
-    elif base_l > 130:
-        # Medium/Olive skin: balanced golden radiance
-        chroma_a_boost = strength * 0.8 * midtone_weight
-        chroma_b_boost = strength * 1.4 * midtone_weight
+    new_l = np.where(mask_binary > 0, np.clip(l_chan + lift_amount, 0, 255), l_chan)
+
+    # Tone-Adaptive Warm Golden & Peachy Radiance (Studio Portrait Glow)
+    # Proportionally boosts rich warmth and rosy vitality as lightness lifts,
+    # completely eliminating washed-out, chalky, or gray cast.
+    if base_l > 165:
+        # Fair/Porcelain skin: luminous rose-alabaster warmth
+        chroma_a_boost = strength * 5.5 * midtone_weight * hair_gate
+        chroma_b_boost = strength * 11.5 * midtone_weight * hair_gate
     else:
-        # Deep/Dark skin: rich warm bronze radiance
-        chroma_a_boost = strength * 1.5 * midtone_weight
-        chroma_b_boost = strength * 2.2 * midtone_weight
+        # Medium/Olive skin: rich golden-peach radiance
+        chroma_a_boost = strength * 6.2 * midtone_weight * hair_gate
+        chroma_b_boost = strength * 14.5 * midtone_weight * hair_gate
 
-    new_a = np.clip(a_chan + chroma_a_boost, 0, 255)
-    new_b = np.clip(b_chan + chroma_b_boost, 0, 255)
+    new_a = np.where(mask_binary > 0, np.clip(a_chan + chroma_a_boost, 0, 255), a_chan)
+    new_b = np.where(mask_binary > 0, np.clip(b_chan + chroma_b_boost, 0, 255), b_chan)
 
     merged_lab = cv2.merge([new_l, new_a, new_b]).astype(np.uint8)
     lightened_full_rgb = cv2.cvtColor(merged_lab, cv2.COLOR_LAB2RGB)
 
-    # Feather the skin mask for seamless alpha blending
-    if feather_radius > 0:
-        ksize = feather_radius * 2 + 1
-        feathered_alpha = cv2.GaussianBlur(skin_mask, (ksize, ksize), 0)
+    # Resolution-adaptive soft edge feathering for seamless blending
+    dim = min(h, w)
+    eff_feather = max(feather_radius, max(12, int(dim * 0.015)))
+    if eff_feather > 0:
+        ksize = eff_feather * 2 + 1
+        feathered_alpha = cv2.GaussianBlur(skin_mask.astype(np.float32), (ksize, ksize), eff_feather / 2.2)
+        feathered_alpha = np.clip(feathered_alpha, 0.0, 255.0).astype(np.uint8)
     else:
         feathered_alpha = skin_mask.copy()
 
-    return lightened_full_rgb, feathered_alpha
+    alpha_f = (feathered_alpha.astype(np.float32) / 255.0)[:, :, None]
+    composited_rgb = (img_rgb.astype(np.float32) * (1.0 - alpha_f) + lightened_full_rgb.astype(np.float32) * alpha_f).clip(0, 255).astype(np.uint8)
+    composited_rgb = np.where(skin_mask[:, :, None] > 0, composited_rgb, img_rgb)
+
+    return composited_rgb, feathered_alpha
+
 
 
 def apply_relative_lighten(
@@ -130,6 +135,9 @@ def create_lightened_rgba_patch(
     r = Image.fromarray(lightened_rgb[:, :, 0])
     g = Image.fromarray(lightened_rgb[:, :, 1])
     b = Image.fromarray(lightened_rgb[:, :, 2])
+    # ONLY face skin parts have non-zero alpha! Outside the face is 100% transparent!
     a = Image.fromarray(alpha)
 
-    return Image.merge("RGBA", (r, g, b, a))
+    patch = Image.merge("RGBA", (r, g, b, a))
+    from server import anchor_corners_rgba
+    return anchor_corners_rgba(patch)

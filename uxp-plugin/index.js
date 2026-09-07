@@ -794,70 +794,93 @@ async function exportFullPortrait() {
   }
   logDebug(`Active document: "${doc.name || 'Untitled'}" (${doc.width}x${doc.height}px, mode=${doc.mode})`, "info");
 
-  // Strategy 1: Ultra-fast native UXP Imaging API
-  if (photoshop.imaging && typeof photoshop.imaging.getPixels === "function" && typeof photoshop.imaging.encodeImageData === "function") {
-    try {
-      logDebug("Capturing via photoshop.imaging API...", "info");
-      const t0 = Date.now();
-      const base64Data = await core.executeAsModal(async () => {
-        const pixels = await photoshop.imaging.getPixels({
-          documentID: doc.id
-        });
-        const encoded = await photoshop.imaging.encodeImageData({
-          imageData: pixels.imageData,
-          base64: true,
-          format: "png"
-        });
-        pixels.imageData.dispose();
-        return encoded;
-      }, { commandName: "Capture Portrait Snapshot" });
-
-      if (base64Data) {
-        const dt = Date.now() - t0;
-        const fullDataUrl = typeof base64Data === "string" && base64Data.startsWith("data:") ? base64Data : `data:image/png;base64,${base64Data}`;
-        const blob = dataUrlToBlob(fullDataUrl);
-        logDebug(`Imaging capture succeeded in ${dt}ms (${(blob.size / 1024).toFixed(1)} KB)`, "ok");
-        return blob;
+  // Temporarily hide any existing AI Retouch layers/groups so we capture the clean base portrait
+  const previouslyVisible = [];
+  try {
+    for (const layer of doc.layers) {
+      const name = layer.name || "";
+      if (name.startsWith("AI ") || name.includes("Retouch") || name.includes("Mask")) {
+        if (layer.visible) {
+          previouslyVisible.push(layer);
+          layer.visible = false;
+        }
       }
-    } catch (imagingErr) {
-      logDebug(`Imaging API fallback: ${imagingErr.message || imagingErr}`, "warn");
     }
+  } catch (hideErr) {
+    logDebug(`Layer hide note: ${hideErr.message || hideErr}`, "warn");
   }
 
-  // Strategy 2: Document Save Copy Fallback
-  logDebug("Capturing via temporary PNG file export...", "info");
-  const t0 = Date.now();
-  const tempFolder = await localFileSystem.getTemporaryFolder();
-  const portraitFile = await tempFolder.createFile("portrait_temp.png", { overwrite: true });
-  const portraitToken = localFileSystem.createSessionToken(portraitFile);
+  try {
+    // Strategy 1: Ultra-fast native UXP Imaging API
+    if (photoshop.imaging && typeof photoshop.imaging.getPixels === "function" && typeof photoshop.imaging.encodeImageData === "function") {
+      try {
+        logDebug("Capturing via photoshop.imaging API...", "info");
+        const t0 = Date.now();
+        const base64Data = await core.executeAsModal(async () => {
+          const pixels = await photoshop.imaging.getPixels({
+            documentID: doc.id
+          });
+          const encoded = await photoshop.imaging.encodeImageData({
+            imageData: pixels.imageData,
+            base64: true,
+            format: "png"
+          });
+          pixels.imageData.dispose();
+          return encoded;
+        }, { commandName: "Capture Portrait Snapshot" });
 
-  await core.executeAsModal(async () => {
-    await action.batchPlay([
-      {
-        _obj: "save",
-        as: {
-          _obj: "PNGFormat",
-          method: { _enum: "PNGMethod", _value: "quick" }
-        },
-        in: { _path: portraitToken, _kind: "local" },
-        copy: true,
-        lowerCase: true,
-        _options: { dialogOptions: "dontDisplay" }
+        if (base64Data) {
+          const dt = Date.now() - t0;
+          const fullDataUrl = typeof base64Data === "string" && base64Data.startsWith("data:") ? base64Data : `data:image/png;base64,${base64Data}`;
+          const blob = dataUrlToBlob(fullDataUrl);
+          logDebug(`Imaging capture succeeded in ${dt}ms (${(blob.size / 1024).toFixed(1)} KB)`, "ok");
+          return blob;
+        }
+      } catch (imagingErr) {
+        logDebug(`Imaging API fallback: ${imagingErr.message || imagingErr}`, "warn");
       }
-    ], {});
-  }, { commandName: "Export Portrait Snapshot" });
+    }
 
-  const rawBytes = await portraitFile.read({ format: uxp.storage.formats.binary });
-  const b64 = arrayBufferToBase64(rawBytes);
-  const blob = new Blob([rawBytes], { type: "image/png" });
-  blob._dataUrl = `data:image/png;base64,${b64}`;
-  const dt = Date.now() - t0;
-  logDebug(`File export succeeded in ${dt}ms (${(blob.size / 1024).toFixed(1)} KB)`, "ok");
-  return blob;
+    // Strategy 2: Document Save Copy Fallback
+    logDebug("Capturing via temporary PNG file export...", "info");
+    const t0 = Date.now();
+    const tempFolder = await localFileSystem.getTemporaryFolder();
+    const portraitFile = await tempFolder.createFile("portrait_temp.png", { overwrite: true });
+    const portraitToken = localFileSystem.createSessionToken(portraitFile);
+
+    await core.executeAsModal(async () => {
+      await action.batchPlay([
+        {
+          _obj: "save",
+          as: {
+            _obj: "PNGFormat",
+            method: { _enum: "PNGMethod", _value: "quick" }
+          },
+          in: { _path: portraitToken, _kind: "local" },
+          copy: true,
+          lowerCase: true,
+          _options: { dialogOptions: "dontDisplay" }
+        }
+      ], {});
+    }, { commandName: "Export Portrait Snapshot" });
+
+    const rawBytes = await portraitFile.read({ format: uxp.storage.formats.binary });
+    const b64 = arrayBufferToBase64(rawBytes);
+    const blob = new Blob([rawBytes], { type: "image/png" });
+    blob._dataUrl = `data:image/png;base64,${b64}`;
+    const dt = Date.now() - t0;
+    logDebug(`File export succeeded in ${dt}ms (${(blob.size / 1024).toFixed(1)} KB)`, "ok");
+    return blob;
+  } finally {
+    // Restore visibility of any previously visible AI layers
+    for (const layer of previouslyVisible) {
+      try { layer.visible = true; } catch (e) {}
+    }
+  }
 }
 
 /* ============================== LAYER PLACEMENT HELPERS ============================== */
-async function placePatchAsLayer(pngBuffer, fileName, layerName) {
+async function placePatchAsLayer(pngBuffer, fileName, layerName, blendMode = null, opacityPercent = null) {
   const tempFolder = await localFileSystem.getTemporaryFolder();
   const patchFile = await tempFolder.createFile(fileName, { overwrite: true });
   await patchFile.write(pngBuffer, { format: uxp.storage.formats.binary });
@@ -865,6 +888,19 @@ async function placePatchAsLayer(pngBuffer, fileName, layerName) {
 
   let placedId = null;
   await core.executeAsModal(async () => {
+    // 1. Clear any active selection so Photoshop places aligned with full canvas
+    try {
+      await action.batchPlay([
+        {
+          _obj: "set",
+          _target: [{ _ref: "channel", _property: "selection" }],
+          to: { _enum: "ordinal", _value: "none" },
+          _options: { dialogOptions: "dontDisplay" }
+        }
+      ], {});
+    } catch (deselErr) {}
+
+    // 2. Place embedded layer
     await action.batchPlay([
       {
         _obj: "placeEvent",
@@ -872,10 +908,78 @@ async function placePatchAsLayer(pngBuffer, fileName, layerName) {
         _options: { dialogOptions: "dontDisplay" }
       }
     ], {});
+
+    // 3. Rasterize placed layer to make it an editable raster layer
+    try {
+      await action.batchPlay([
+        {
+          _obj: "rasterizeLayer",
+          _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }],
+          _options: { dialogOptions: "dontDisplay" }
+        }
+      ], {});
+    } catch (rastErr) {}
+
     const active = app.activeDocument.activeLayers;
     if (active && active.length > 0) {
-      active[0].name = layerName;
-      placedId = active[0].id;
+      const placedLayer = active[0];
+      placedLayer.name = layerName;
+      placedId = placedLayer.id;
+
+      // Bit-perfect (0, 0) snapping:
+      // If Photoshop placed the layer with any offset (bounds.left != 0 or bounds.top != 0),
+      // automatically translate it back to (0, 0) immediately!
+      try {
+        const bounds = placedLayer.bounds;
+        if (bounds) {
+          const curLeft = Number(bounds.left) || 0;
+          const curTop = Number(bounds.top) || 0;
+          if (Math.abs(curLeft) > 0.05 || Math.abs(curTop) > 0.05) {
+            logDebug(`Snapping ${layerName} from (${curLeft}, ${curTop}) to (0, 0)...`, "info");
+            await placedLayer.translate(-curLeft, -curTop);
+          }
+        }
+      } catch (alignErr) {
+        logDebug(`Placement alignment note: ${alignErr.message || alignErr}`, "warn");
+      }
+
+      if (blendMode) {
+        try {
+          await action.batchPlay([
+            {
+              _obj: "set",
+              _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }],
+              to: {
+                _obj: "layer",
+                mode: { _enum: "blendMode", _value: blendMode }
+              },
+              _options: { dialogOptions: "dontDisplay" }
+            }
+          ], {});
+        } catch (bmErr) {
+          logDebug(`Blend mode ${blendMode} note: ${bmErr.message || bmErr}`, "info");
+        }
+      }
+
+      if (opacityPercent !== null && opacityPercent !== undefined) {
+        try {
+          placedLayer.opacity = opacityPercent;
+        } catch (opErr) {
+          try {
+            await action.batchPlay([
+              {
+                _obj: "set",
+                _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }],
+                to: {
+                  _obj: "layer",
+                  opacity: { _unit: "percentUnit", _value: opacityPercent }
+                },
+                _options: { dialogOptions: "dontDisplay" }
+              }
+            ], {});
+          } catch (e) {}
+        }
+      }
     }
   }, { commandName: `Place ${layerName}` });
   return placedId;
@@ -1496,7 +1600,27 @@ btnApplyAll.addEventListener("click", async () => {
     const doc = app.activeDocument;
     if (!doc) throw new Error("No active document open in Photoshop.");
 
-    setLog("Capturing fresh full-resolution snapshot\u2026", "info");
+    // Clean up any previous AI Retouch group so applying with new slider settings replaces it cleanly
+    try {
+      await core.executeAsModal(async () => {
+        for (const layer of doc.layers) {
+          if (layer.name === "AI Retouch" || layer.name === "AI Retouching") {
+            await action.batchPlay([
+              {
+                _obj: "delete",
+                _target: [{ _ref: "layer", _name: layer.name }],
+                _options: { dialogOptions: "dontDisplay" }
+              }
+            ], {});
+          }
+        }
+      }, { commandName: "Clean Old AI Retouch Group" });
+    } catch (cleanErr) {
+      logDebug(`Previous retouch cleanup note: ${cleanErr.message || cleanErr}`, "info");
+    }
+
+    setLog("Capturing fresh full-resolution snapshot…", "info");
+    const docRes = (doc && doc.resolution) ? doc.resolution : 72;
     const portraitBlob = await exportFullPortrait();
     const placedNames = [];
     const placedIds = [];
@@ -1516,8 +1640,8 @@ btnApplyAll.addEventListener("click", async () => {
     if (doHeal) {
       const activeBlobs = currentBlobs.filter(b => b.active !== false);
       if (activeBlobs.length > 0) {
-        applyBtnText.textContent = `Healing ${activeBlobs.length} spots\u2026`;
-        setLog(`AI inpainting ${activeBlobs.length} regions\u2026`, "info");
+        applyBtnText.textContent = `Healing ${activeBlobs.length} spots…`;
+        setLog(`AI inpainting ${activeBlobs.length} regions…`, "info");
 
         const healForm = new FormData();
         healForm.append("image", portraitBlob, "portrait.png");
@@ -1525,27 +1649,63 @@ btnApplyAll.addEventListener("click", async () => {
         healForm.append("texture_blend", (parseInt(sliderTexture.value, 10) / 100).toString());
         healForm.append("feather_radius", sliderFeather.value);
         healForm.append("grain_intensity", (parseInt(sliderGrain.value, 10) / 100).toString());
+        healForm.append("resolution", String(docRes));
         if (currentSkinMaskBlob) healForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
 
         const healRes = await fetch(`${getServerUrl()}/apply-heal`, { method: "POST", body: healForm });
         if (!healRes.ok) throw new Error(`Healing failed: ${await healRes.text()}`);
 
         const healBuffer = await (await healRes.blob()).arrayBuffer();
-        const hid = await placePatchAsLayer(healBuffer, "healed_layer.png", "AI Healed Blemishes");
-        placedNames.push("AI Healed Blemishes");
+        const hid = await placePatchAsLayer(healBuffer, "healed_layer.png", "AI Blemish Healing", "normal", 100);
+        placedNames.push("AI Blemish Healing");
         if (hid) placedIds.push(hid);
       }
     }
 
-    /* ACTION 2: AI Dodge & Burn (Micro-Contrast Tonal Evening) */
+    /* ACTION 2: Smooth Skin (Low-Freq Tone Smoothing) */
+    if (doSmooth) {
+      applyBtnText.textContent = "Smoothing skin…";
+      setLog("Frequency-separation smoothing…", "info");
+
+      try {
+        const smoothForm = new FormData();
+        smoothForm.append("image", portraitBlob, "portrait.png");
+        smoothForm.append("strength", (parseInt(sliderSmoothStrength.value, 10) / 100).toString());
+        smoothForm.append("texture_keep", (parseInt(sliderTextureKeep.value, 10) / 100).toString());
+        smoothForm.append("feather_radius", sliderFeather.value);
+        smoothForm.append("resolution", String(docRes));
+        if (currentSkinMaskBlob) smoothForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
+        if (healChainActive) {
+          smoothForm.append("blobs_json", JSON.stringify(healChainBlobs));
+          smoothForm.append("heal_mode", healChainParams.heal_mode);
+          smoothForm.append("texture_blend", healChainParams.texture_blend);
+          smoothForm.append("grain_intensity", healChainParams.grain_intensity);
+        }
+
+        const smoothRes = await fetch(`${getServerUrl()}/apply-smooth`, { method: "POST", body: smoothForm });
+        if (smoothRes.ok) {
+          const smoothBuffer = await (await smoothRes.blob()).arrayBuffer();
+          const smid = await placePatchAsLayer(smoothBuffer, "smoothed_layer.png", "AI Low-Freq Tone Smoothing", "normal", 100);
+          placedNames.push("AI Low-Freq Tone Smoothing");
+          if (smid) placedIds.push(smid);
+        } else {
+          logDebug(`[APPLY] Smoothing response: ${await smoothRes.text()}`, "warn");
+        }
+      } catch (smoothErr) {
+        logDebug(`[APPLY] Smoothing skipped: ${smoothErr.message}`, "warn");
+      }
+    }
+
+    /* ACTION 3: AI Dodge & Burn (Face Volume) */
     if (doDb) {
-      applyBtnText.textContent = "Applying Dodge & Burn\u2026";
-      setLog("AI micro-contrast Dodge & Burn\u2026", "info");
+      applyBtnText.textContent = "Applying Dodge & Burn…";
+      setLog("AI micro-contrast Dodge & Burn…", "info");
 
       const dbForm = new FormData();
       dbForm.append("image", portraitBlob, "portrait.png");
       dbForm.append("strength", (parseInt(sliderDbStrength.value, 10) / 100).toString());
       dbForm.append("feather_radius", sliderFeather.value);
+      dbForm.append("resolution", String(docRes));
       if (currentSkinMaskBlob) dbForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
       if (healChainActive) {
         dbForm.append("blobs_json", JSON.stringify(healChainBlobs));
@@ -1558,8 +1718,9 @@ btnApplyAll.addEventListener("click", async () => {
         const dbRes = await fetch(`${getServerUrl()}/apply-dodge-burn`, { method: "POST", body: dbForm });
         if (dbRes.ok) {
           const dbBuffer = await (await dbRes.blob()).arrayBuffer();
-          const dbid = await placePatchAsLayer(dbBuffer, "dodge_burn_layer.png", "AI Dodge & Burn");
-          placedNames.push("AI Dodge & Burn");
+          // Placed with Soft Light at 35% opacity as specified for instant photographer control
+          const dbid = await placePatchAsLayer(dbBuffer, "dodge_burn_layer.png", "AI Dodge & Burn (Volume)", "softLight", 35);
+          placedNames.push("AI Dodge & Burn (Volume)");
           if (dbid) placedIds.push(dbid);
         } else {
           logDebug(`[APPLY] Dodge & Burn response: ${await dbRes.text()}`, "warn");
@@ -1569,43 +1730,10 @@ btnApplyAll.addEventListener("click", async () => {
       }
     }
 
-    /* ACTION 3: Smooth Skin (frequency separation + redness even) */
-    if (doSmooth) {
-      applyBtnText.textContent = "Smoothing skin\u2026";
-      setLog("Frequency-separation smoothing\u2026", "info");
-
-      try {
-        const smoothForm = new FormData();
-        smoothForm.append("image", portraitBlob, "portrait.png");
-        smoothForm.append("strength", (parseInt(sliderSmoothStrength.value, 10) / 100).toString());
-        smoothForm.append("texture_keep", (parseInt(sliderTextureKeep.value, 10) / 100).toString());
-        smoothForm.append("feather_radius", sliderFeather.value);
-        if (currentSkinMaskBlob) smoothForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
-        if (healChainActive) {
-          smoothForm.append("blobs_json", JSON.stringify(healChainBlobs));
-          smoothForm.append("heal_mode", healChainParams.heal_mode);
-          smoothForm.append("texture_blend", healChainParams.texture_blend);
-          smoothForm.append("grain_intensity", healChainParams.grain_intensity);
-        }
-
-        const smoothRes = await fetch(`${getServerUrl()}/apply-smooth`, { method: "POST", body: smoothForm });
-        if (smoothRes.ok) {
-          const smoothBuffer = await (await smoothRes.blob()).arrayBuffer();
-          const smid = await placePatchAsLayer(smoothBuffer, "smoothed_layer.png", "AI Smoothed Skin");
-          placedNames.push("AI Smoothed Skin");
-          if (smid) placedIds.push(smid);
-        } else {
-          logDebug(`[APPLY] Smoothing response: ${await smoothRes.text()}`, "warn");
-        }
-      } catch (smoothErr) {
-        logDebug(`[APPLY] Smoothing skipped: ${smoothErr.message}`, "warn");
-      }
-    }
-
-    /* ACTION 4: AI Skin Tone Harmonization & Lift */
+    /* ACTION 4: AI Skin Tone / Warmth Lift */
     if (doLighten) {
-      applyBtnText.textContent = "Applying Skin Tone Lift\u2026";
-      setLog("AI Skin Tone Harmonization\u2026", "info");
+      applyBtnText.textContent = "Applying Skin Tone Lift…";
+      setLog("AI Skin Tone Harmonization…", "info");
 
       try {
         const lightenForm = new FormData();
@@ -1613,6 +1741,7 @@ btnApplyAll.addEventListener("click", async () => {
         lightenForm.append("strength", (parseInt(sliderStrength.value, 10) / 100).toString());
         lightenForm.append("feather_radius", sliderFeather ? sliderFeather.value : "4");
         lightenForm.append("base_tone_lab", JSON.stringify(sampledBaseTone.lab));
+        lightenForm.append("resolution", String(docRes));
         if (currentSkinMaskBlob) lightenForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
         if (healChainActive) {
           lightenForm.append("blobs_json", JSON.stringify(healChainBlobs));
@@ -1624,12 +1753,12 @@ btnApplyAll.addEventListener("click", async () => {
           lightenForm.append("smooth_strength", (parseInt(sliderSmoothStrength.value, 10) / 100).toString());
           lightenForm.append("texture_keep", (parseInt(sliderTextureKeep.value, 10) / 100).toString());
         }
-
         const lightenRes = await fetch(`${getServerUrl()}/apply-lighten`, { method: "POST", body: lightenForm });
         if (lightenRes.ok) {
           const lightenBuffer = await (await lightenRes.blob()).arrayBuffer();
-          const lid = await placePatchAsLayer(lightenBuffer, "lighten_layer.png", "AI Skin Tone Lift");
-          placedNames.push("AI Skin Tone Lift");
+          // Placed with Soft Light at 28% opacity for rich golden-peach radiance without washing out skin
+          const lid = await placePatchAsLayer(lightenBuffer, "lighten_layer.png", "AI Skin Tone / Warmth Lift", "softLight", 28);
+          placedNames.push("AI Skin Tone / Warmth Lift");
           if (lid) placedIds.push(lid);
         } else {
           logDebug(`[APPLY] Skin Tone Lift response: ${await lightenRes.text()}`, "warn");
@@ -1639,10 +1768,10 @@ btnApplyAll.addEventListener("click", async () => {
       }
     }
 
-    /* ACTION 5: AI Eyes & Teeth Enhancer */
+    /* ACTION 5: AI Eyes & Teeth Brilliance */
     if (doEyesTeeth) {
-      applyBtnText.textContent = "Enhancing eyes & teeth\u2026";
-      setLog("AI teeth whitening & iris sparkle\u2026", "info");
+      applyBtnText.textContent = "Enhancing eyes & teeth…";
+      setLog("AI teeth whitening & iris sparkle…", "info");
 
       try {
         const eyeForm = new FormData();
@@ -1650,12 +1779,13 @@ btnApplyAll.addEventListener("click", async () => {
         eyeForm.append("teeth_whiten", (parseInt(sliderTeeth.value, 10) / 100).toString());
         eyeForm.append("eye_brighten", (parseInt(sliderEyes.value, 10) / 100).toString());
         eyeForm.append("feather_radius", "3");
+        eyeForm.append("resolution", String(docRes));
 
         const eyeRes = await fetch(`${getServerUrl()}/apply-eye-teeth`, { method: "POST", body: eyeForm });
         if (eyeRes.ok) {
           const eyeBuffer = await (await eyeRes.blob()).arrayBuffer();
-          const etid = await placePatchAsLayer(eyeBuffer, "eyes_teeth_layer.png", "AI Eyes & Teeth");
-          placedNames.push("AI Eyes & Teeth");
+          const etid = await placePatchAsLayer(eyeBuffer, "eyes_teeth_layer.png", "AI Eyes & Teeth Brilliance", "normal", 100);
+          placedNames.push("AI Eyes & Teeth Brilliance");
           if (etid) placedIds.push(etid);
         } else {
           logDebug(`[APPLY] Eyes & Teeth response: ${await eyeRes.text()}`, "warn");
@@ -1667,14 +1797,15 @@ btnApplyAll.addEventListener("click", async () => {
 
     /* ACTION 6: AI Anti-Glare Shine Neutralizer */
     if (doShine) {
-      applyBtnText.textContent = "Defusing shine\u2026";
-      setLog("AI specular shine reduction\u2026", "info");
+      applyBtnText.textContent = "Defusing shine…";
+      setLog("AI specular shine reduction…", "info");
 
       try {
         const shineForm = new FormData();
         shineForm.append("image", portraitBlob, "portrait.png");
         shineForm.append("strength", (parseInt(sliderShine.value, 10) / 100).toString());
         shineForm.append("feather_radius", "4");
+        shineForm.append("resolution", String(docRes));
         if (currentSkinMaskBlob) shineForm.append("skin_mask", currentSkinMaskBlob, "skin_mask.png");
         if (healChainActive) {
           shineForm.append("blobs_json", JSON.stringify(healChainBlobs));
@@ -1686,7 +1817,7 @@ btnApplyAll.addEventListener("click", async () => {
         const shineRes = await fetch(`${getServerUrl()}/apply-shine-neutralize`, { method: "POST", body: shineForm });
         if (shineRes.ok) {
           const shineBuffer = await (await shineRes.blob()).arrayBuffer();
-          const shid = await placePatchAsLayer(shineBuffer, "anti_shine_layer.png", "AI Anti-Glare Shine");
+          const shid = await placePatchAsLayer(shineBuffer, "anti_shine_layer.png", "AI Anti-Glare Shine", "normal", 100);
           placedNames.push("AI Anti-Glare Shine");
           if (shid) placedIds.push(shid);
         } else {
@@ -1697,10 +1828,10 @@ btnApplyAll.addEventListener("click", async () => {
       }
     }
 
-    /* Group results under one tidy group */
+    /* Group results under one tidy Master Retouch group */
     if (placedNames.length > 1 || placedIds.length > 1) {
       applyBtnText.textContent = "Grouping layers\u2026";
-      await groupRetouchLayers("AI Retouch", placedNames, placedIds);
+      await groupRetouchLayers("Master Retouch", placedNames, placedIds);
     }
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);

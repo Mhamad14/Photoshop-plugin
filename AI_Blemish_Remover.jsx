@@ -126,11 +126,22 @@
         var doc = app.activeDocument;
         var origRuler = app.preferences.rulerUnits;
         try { app.preferences.rulerUnits = Units.PIXELS; } catch (e) {}
+        try { doc.selection.deselect(); } catch (e) {}
 
         var tempDoc = app.open(file);
         var importedLayer = null;
 
         try {
+            try { tempDoc.selection.deselect(); } catch (e) {}
+
+            // Match DPI without resampling pixels so duplicate() aligns 1:1
+            if (Math.abs(tempDoc.resolution - doc.resolution) > 0.05) {
+                tempDoc.resizeImage(tempDoc.width, tempDoc.height, doc.resolution, ResampleMethod.NONE);
+            }
+            if (tempDoc.width.as("px") !== doc.width.as("px") || tempDoc.height.as("px") !== doc.height.as("px")) {
+                tempDoc.resizeImage(doc.width, doc.height, doc.resolution, ResampleMethod.NONE);
+            }
+
             // Convert Background layer to normal ArtLayer so Photoshop allows duplication
             if (tempDoc.activeLayer.isBackgroundLayer) {
                 tempDoc.activeLayer.isBackgroundLayer = false;
@@ -145,6 +156,14 @@
                 tempDoc.close(SaveOptions.DONOTSAVECHANGES);
                 doc.paste();
                 importedLayer = doc.activeLayer;
+                if (importedLayer && importedLayer.bounds) {
+                    var b = importedLayer.bounds;
+                    var bx = b[0].as("px");
+                    var by = b[1].as("px");
+                    if (bx !== 0 || by !== 0) {
+                        importedLayer.translate(-bx, -by);
+                    }
+                }
             } catch (copyErr) {
                 try { tempDoc.close(SaveOptions.DONOTSAVECHANGES); } catch (e3) {}
                 alert("Layer import failed: " + dupErr.message, "AI Import Error");
@@ -155,6 +174,8 @@
         try { app.preferences.rulerUnits = origRuler; } catch (e) {}
 
         if (!importedLayer) return null;
+
+        // Layer was duplicated at identical document resolution and dimensions, keeping 1:1 coordinates
 
         doc.activeLayer = importedLayer;
         if (layerName) importedLayer.name = layerName;
@@ -321,7 +342,7 @@
         if (autoHealedFile.exists) autoHealedFile.remove();
         if (errLogFile.exists) errLogFile.remove();
 
-        exportCleanPortrait(fullExportFile, false);
+        exportCleanPortrait(fullExportFile, true);
 
         var exportPath = fullExportFile.fsName.replace(/\\/g, "/");
         var outputPath = autoHealedFile.fsName.replace(/\\/g, "/");

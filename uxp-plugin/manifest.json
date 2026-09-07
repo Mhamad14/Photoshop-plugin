@@ -6,7 +6,7 @@
   "manifestVersion": 5,
   "host": {
     "app": "PS",
-    "minVersion": "23.0.0",
+    "minVersion": "23.3.0",
     "data": {
       "apiVersion": 2
     }
@@ -44,9 +44,12 @@
     {
       "width": 23,
       "height": 23,
-      "path": "icons/icon-23.png",
-      "scale": [1, 2],
-      "theme": ["darkest", "dark", "medium", "lightest"]
+      "path": "icons/icon-23.png"
+    },
+    {
+      "width": 48,
+      "height": 48,
+      "path": "icons/icon-48.png"
     }
   ]
 }

@@ -68,6 +68,7 @@ def neutralize_skin_shine(
     # Soften the shine mask
     ksize = feather_radius * 2 + 1
     shine_soft = cv2.GaussianBlur(shine_mask, (ksize, ksize), 0)
+    shine_soft = np.minimum(shine_soft, skin_binary)
 
     # Retain 18% organic specular sheen so highlights look natural and alive (not dead/gray)
     l_corrected_matte = l_matte + (l_chan - l_matte) * 0.18
@@ -79,10 +80,12 @@ def neutralize_skin_shine(
     # Blend shine pixels toward textured matte tone
     s_factor = (shine_soft * min(1.0, strength) * 0.88)[:, :, None]
     composited = (img_f * (1.0 - s_factor) + matte_textured * s_factor).clip(0, 255).astype(np.uint8)
+    composited = np.where(skin_mask[:, :, None] > 0, composited, img_rgb)
 
     patch_alpha = (shine_soft * min(1.0, strength) * 255.0).clip(0, 255).astype(np.uint8)
 
     return composited, patch_alpha
+
 
 
 def apply_shine_neutralizer(
@@ -112,5 +115,8 @@ def create_shine_neutralizer_rgba_patch(
     r = Image.fromarray(composited[:, :, 0])
     g = Image.fromarray(composited[:, :, 1])
     b = Image.fromarray(composited[:, :, 2])
+    # Transparent alpha: ONLY shine glare regions have non-zero opacity! Outside is 100% transparent.
     a = Image.fromarray(alpha)
-    return Image.merge("RGBA", (r, g, b, a))
+    patch = Image.merge("RGBA", (r, g, b, a))
+    from server import anchor_corners_rgba
+    return anchor_corners_rgba(patch)

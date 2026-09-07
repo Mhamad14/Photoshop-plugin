@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import socket
 import subprocess
 
@@ -29,10 +30,11 @@ def is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
 def find_available_port(preferred_port: int = 8765, host: str = "127.0.0.1") -> int:
     if not is_port_in_use(preferred_port, host):
         return preferred_port
-    # Give Windows TIME_WAIT a brief moment (1.5s) to release the port
-    time.sleep(1.5)
-    if not is_port_in_use(preferred_port, host):
-        return preferred_port
+    # Give Windows TIME_WAIT sockets a brief moment to release
+    for _ in range(3):
+        time.sleep(1.0)
+        if not is_port_in_use(preferred_port, host):
+            return preferred_port
     print(f"[!] Port {preferred_port} is busy. Probing alternative ports...")
     for alt_port in [8766, 8001, 9001, 5005]:
         if not is_port_in_use(alt_port, host):
@@ -69,6 +71,21 @@ def main():
         req_path = os.path.join(os.path.dirname(__file__), "requirements.txt")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req_path])
     
+    # Check if an existing AI Retouch server is already running and healthy on port 8765
+    if is_port_in_use(8765):
+        try:
+            import urllib.request
+            with urllib.request.urlopen("http://127.0.0.1:8765/health", timeout=1.5) as resp:
+                if resp.status == 200:
+                    print("[+] AI Retouch Server is ALREADY RUNNING and healthy on http://127.0.0.1:8765!")
+                    print("[+] Web Studio UI: http://127.0.0.1:8765")
+                    print("[*] Photoshop Plugin & Web Studio are connected and ready to use.")
+                    print("=" * 60)
+                    input("\nPress Enter to close this window (the server will keep running)...")
+                    return
+        except Exception:
+            pass
+
     port = find_available_port(8765)
     print(f"[*] Launching Uvicorn server on http://127.0.0.1:{port} ...")
     print(f"[+] Web Studio UI available at: http://127.0.0.1:{port}")
